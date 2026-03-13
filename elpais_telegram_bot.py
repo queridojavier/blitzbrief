@@ -1,9 +1,10 @@
 """
-📰 El País → Telegram: Resumen diario de tus columnistas favoritos
-====================================================================
+📰 Vigía — Resumen diario de tus columnistas favoritos → Telegram
+==================================================================
 
-Este script consulta las páginas de autor de El País, detecta artículos
-publicados en las últimas 24 horas y envía un resumen por Telegram.
+Este script consulta las páginas de autor de El País y El Plural,
+detecta artículos publicados en las últimas 24 horas y envía un
+resumen por Telegram.
 
 Pensado para ejecutarse una vez al día (por ejemplo, a las 8:00 AM)
 mediante GitHub Actions, cron, o cualquier scheduler.
@@ -12,8 +13,8 @@ Configuración:
   1. Crea un bot de Telegram con @BotFather y copia el token.
   2. Obtén tu chat_id enviando un mensaje al bot y consultando
      https://api.telegram.org/bot<TOKEN>/getUpdates
-  3. Configura las variables de entorno (o edita el dict AUTHORS y las
-     constantes TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID más abajo).
+  3. Configura las variables de entorno (o edita los dicts de autores
+     y las constantes TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID más abajo).
 
 Uso local:
   pip install requests beautifulsoup4
@@ -43,28 +44,29 @@ from bs4 import BeautifulSoup
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Autores a seguir.
+# ── Autores de El País ─────────────────────────────────────────────
 # Clave: nombre para mostrar | Valor: slug del autor en El País
-# Para encontrar el slug, ve a https://elpais.com y busca la página del
-# autor. La URL será algo como https://elpais.com/autor/manuel-jabois-sueiro/
-# El slug es "manuel-jabois-sueiro".
-AUTHORS: dict[str, str] = {
+# URL: https://elpais.com/autor/<slug>/
+ELPAIS_AUTHORS: dict[str, str] = {
     "Manuel Jabois": "manuel-jabois-sueiro",
     "Juan José Millás": "juan-jose-millas",
     "Javier Cercas": "javier-cercas",
     "Rosa Montero": "rosa-montero",
     "Leila Guerriero": "leila-guerriero",
-    "Sergio del Molino": "sergio-del-molino",
-    "Kiko Llaneras": "kiko-llaneras",
-    "Jose Luis Sastre": "jose-luis-sastre",
-
-    # --- Añade aquí más autores ---
+    "Sergio del Molino": "sergio-del-molino-molina",
+    "Kiko Llaneras": "francisco-llaneras-estrada",
+    "José Luis Sastre": "jose-luis-sastre-cebolla",
+    # --- Añade aquí más autores de El País ---
     # "Luz Sánchez-Mellado": "luz-sanchez-mellado",
-    # "Rosa Montero": "rosa-montero",
-    # "Leila Guerriero": "leila-guerriero",
     # "Elvira Lindo": "elvira-lindo",
-    # "Sergio del Molino": "sergio-del-molino",
-    # "Benjamín Prado": "benjamin-prado",
+}
+
+# ── Autores de El Plural ──────────────────────────────────────────
+# Clave: nombre para mostrar | Valor: slug del tag en El Plural
+# URL: https://www.elplural.com/tag/<slug>
+ELPLURAL_AUTHORS: dict[str, str] = {
+    "Benjamín Prado": "benjamin-prado",
+    # --- Añade aquí más autores de El Plural ---
 }
 
 # Ventana temporal: artículos publicados en las últimas N horas
@@ -112,9 +114,8 @@ def article_hash(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 
-def fetch_author_page(slug: str) -> Optional[str]:
-    """Descarga la página de autor de El País."""
-    url = f"https://elpais.com/autor/{slug}/"
+def _fetch_page(url: str) -> Optional[str]:
+    """Descarga una URL y devuelve el HTML."""
     headers = {"User-Agent": USER_AGENT}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
@@ -125,30 +126,32 @@ def fetch_author_page(slug: str) -> Optional[str]:
         return None
 
 
-def parse_articles(html: str, author_name: str, cutoff: datetime) -> list[dict]:
-    """
-    Extrae artículos de la página de autor.
+# ── Scraper: El País ──────────────────────────────────────────────
 
-    El País estructura sus páginas de autor con elementos <article> que
-    contienen un <h2> con enlace y un <time> con la fecha.
-    """
+
+def fetch_elpais_articles(
+    author_name: str, slug: str, cutoff: datetime
+) -> list[dict]:
+    """Extrae artículos recientes de la página de autor de El País."""
+    url = f"https://elpais.com/autor/{slug}/"
+    html = _fetch_page(url)
+    if not html:
+        return []
+
     soup = BeautifulSoup(html, "html.parser")
     articles = []
 
     for article_el in soup.select("article"):
-        # Buscar el enlace del titular
         link_el = article_el.select_one("h2 a")
         if not link_el:
             continue
 
         title = link_el.get_text(strip=True)
         href = link_el.get("href", "")
-
-        # Normalizar URL
         if href.startswith("/"):
             href = f"https://elpais.com{href}"
 
-        # Buscar fecha
+        # Fecha
         time_el = article_el.select_one("time")
         pub_date = None
         if time_el:
@@ -161,15 +164,14 @@ def parse_articles(html: str, author_name: str, cutoff: datetime) -> list[dict]:
                 except ValueError:
                     pass
 
-        # Buscar subtítulo / entradilla
+        # Subtítulo / entradilla
         subtitle_el = article_el.select_one("p")
         subtitle = subtitle_el.get_text(strip=True) if subtitle_el else ""
 
-        # Buscar etiqueta de sección (Columna, Opinión, etc.)
+        # Etiqueta de sección
         tag_el = article_el.select_one("span.c_ty, .c_ty, .a_ti_s")
         tag = tag_el.get_text(strip=True) if tag_el else ""
 
-        # Filtrar por fecha si tenemos la info
         if pub_date and pub_date < cutoff:
             continue
 
@@ -177,12 +179,86 @@ def parse_articles(html: str, author_name: str, cutoff: datetime) -> list[dict]:
             "title": title,
             "url": href,
             "author": author_name,
+            "source": "El País",
             "date": pub_date,
             "subtitle": subtitle,
             "tag": tag,
         })
 
     return articles
+
+
+# ── Scraper: El Plural ────────────────────────────────────────────
+
+
+def fetch_elplural_articles(
+    author_name: str, slug: str, cutoff: datetime
+) -> list[dict]:
+    """
+    Extrae artículos recientes del tag de autor en El Plural.
+
+    El Plural no muestra fechas en el listado, así que visitamos cada
+    artículo para extraer la fecha del meta tag article:published_time.
+    Solo comprobamos los primeros 5 artículos del listado (ya están
+    ordenados de más reciente a más antiguo).
+    """
+    url = f"https://www.elplural.com/tag/{slug}"
+    html = _fetch_page(url)
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    articles = []
+
+    # Los artículos están en divs .item con un <h3><a>
+    items = soup.select("div.item h3 a")[:5]
+
+    for link_el in items:
+        title = link_el.get_text(strip=True)
+        href = link_el.get("href", "")
+        if href.startswith("/"):
+            href = f"https://www.elplural.com{href}"
+
+        # Obtener fecha del artículo individual
+        pub_date = _fetch_elplural_article_date(href)
+
+        if pub_date and pub_date < cutoff:
+            continue
+
+        # Subtítulo del listado (hermano p.excerpt)
+        parent_item = link_el.find_parent("div", class_="item")
+        subtitle = ""
+        if parent_item:
+            excerpt_el = parent_item.select_one("p.excerpt")
+            if excerpt_el:
+                subtitle = excerpt_el.get_text(strip=True)
+
+        articles.append({
+            "title": title,
+            "url": href,
+            "author": author_name,
+            "source": "El Plural",
+            "date": pub_date,
+            "subtitle": subtitle,
+            "tag": "",
+        })
+
+    return articles
+
+
+def _fetch_elplural_article_date(url: str) -> Optional[datetime]:
+    """Extrae la fecha de publicación de un artículo de El Plural."""
+    html = _fetch_page(url)
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    meta = soup.select_one('meta[property="article:published_time"]')
+    if meta and meta.get("content"):
+        try:
+            return datetime.fromisoformat(meta["content"])
+        except ValueError:
+            pass
+    return None
 
 
 def format_telegram_message(all_articles: list[dict]) -> str:
@@ -200,7 +276,9 @@ def format_telegram_message(all_articles: list[dict]) -> str:
         by_author.setdefault(art["author"], []).append(art)
 
     for author, articles in by_author.items():
-        lines.append(f"✍️ *{_escape_md(author)}*")
+        source = articles[0].get("source", "")
+        source_label = f" \\({_escape_md(source)}\\)" if source else ""
+        lines.append(f"✍️ *{_escape_md(author)}*{source_label}")
         for art in articles:
             title = _escape_md(art["title"])
             tag = f" _{_escape_md(art['tag'])}_" if art.get("tag") else ""
@@ -262,26 +340,32 @@ def send_telegram_message(text: str) -> bool:
 
 
 def main():
-    log.info("Iniciando revisión de artículos de El País...")
+    log.info("Iniciando Vigía — revisión de artículos...")
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen = load_seen_articles()
     all_new_articles: list[dict] = []
 
-    for author_name, slug in AUTHORS.items():
-        log.info(f"Consultando: {author_name} ({slug})")
-        html = fetch_author_page(slug)
-        if not html:
-            continue
-
-        articles = parse_articles(html, author_name, cutoff)
-
+    # ── El País ───────────────────────────────────────────────────
+    for author_name, slug in ELPAIS_AUTHORS.items():
+        log.info(f"[El País] Consultando: {author_name} ({slug})")
+        articles = fetch_elpais_articles(author_name, slug, cutoff)
         for art in articles:
             h = article_hash(art["url"])
             if h not in seen:
                 all_new_articles.append(art)
                 seen.add(h)
+        log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
+    # ── El Plural ─────────────────────────────────────────────────
+    for author_name, slug in ELPLURAL_AUTHORS.items():
+        log.info(f"[El Plural] Consultando: {author_name} ({slug})")
+        articles = fetch_elplural_articles(author_name, slug, cutoff)
+        for art in articles:
+            h = article_hash(art["url"])
+            if h not in seen:
+                all_new_articles.append(art)
+                seen.add(h)
         log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
     # Ordenar por fecha (más reciente primero)
