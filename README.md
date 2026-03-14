@@ -1,12 +1,29 @@
-# 📰 El País → Telegram: Resumen diario de columnistas
+# 📰 Vigía — Tu resumen diario de prensa por Telegram
 
-Bot que cada mañana te envía por Telegram los artículos nuevos de tus columnistas favoritos de El País.
+Bot que cada mañana te envía por Telegram los artículos nuevos de tus columnistas favoritos. Soporta múltiples fuentes: **El País**, **El Plural** y **cualquier blog con RSS** (Substack, WordPress, etc.).
 
-## Cómo funciona
+## Qué hace
 
-1. Consulta las páginas de autor de El País (no necesita API ni suscripción)
-2. Detecta artículos publicados en las últimas ~24 horas
-3. Te envía un mensaje formateado por Telegram agrupado por autor
+- Consulta las páginas de autor de El País, El Plural y feeds RSS (no necesita API ni suscripción)
+- Detecta artículos publicados en las últimas ~26 horas
+- Te envía un mensaje formateado por Telegram agrupado por autor
+- Te avisa si alguna fuente falla (URLs rotas, cambios en la web, etc.)
+
+## Comandos del bot
+
+Vigía funciona como un bot interactivo de Telegram con estos comandos:
+
+| Comando | Descripción |
+|---------|-------------|
+| `/update` | Forzar un digest de artículos ahora |
+| `/random` | Artículo aleatorio de un autor al azar |
+| `/random Jabois` | Artículo aleatorio de un autor concreto |
+| `/status` | Ver todos los autores configurados |
+| `/add elpais Nombre slug` | Añadir un autor de El País |
+| `/add elplural Nombre slug` | Añadir un autor de El Plural |
+| `/add rss Nombre url-feed` | Añadir un blog con RSS |
+| `/remove Nombre` | Eliminar un autor |
+| `/help` | Ver todos los comandos |
 
 ## Setup paso a paso
 
@@ -25,75 +42,112 @@ Bot que cada mañana te envía por Telegram los artículos nuevos de tus columni
 
 ### 3. Configurar los autores
 
-Edita el diccionario `AUTHORS` en `elpais_telegram_bot.py`. El slug es la parte final de la URL de la página del autor en El País:
+Los autores se gestionan en `authors.json`. Tiene tres secciones:
+
+```json
+{
+  "elpais": {
+    "Manuel Jabois": "manuel-jabois-sueiro",
+    "Rosa Montero": "rosa-montero"
+  },
+  "elplural": {
+    "Benjamín Prado": "benjamin-prado"
+  },
+  "rss": {
+    "Antonio Ortiz": "https://www.error500.net/feed"
+  }
+}
+```
+
+**¿Cómo encontrar el slug de El País?** Es la parte final de la URL de la página del autor:
 
 ```
 https://elpais.com/autor/manuel-jabois-sueiro/
-                        ^^^^^^^^^^^^^^^^^^^^^^ → este es el slug
+                        ^^^^^^^^^^^^^^^^^^^^^ → slug
 ```
 
-Algunos slugs de ejemplo:
+**¿Cómo encontrar el slug de El Plural?** Igual, pero del tag:
 
-| Autor | Slug |
-|-------|------|
-| Manuel Jabois | `manuel-jabois-sueiro` |
-| Juan José Millás | `juan-jose-millas` |
-| Luz Sánchez-Mellado | `luz-sanchez-mellado` |
-| Rosa Montero | `rosa-montero` |
-| Elvira Lindo | `elvira-lindo` |
-| Sergio del Molino | `sergio-del-molino` |
-| Benjamín Prado | `benjamin-prado` |
-| Javier Cercas | `javier-cercas` |
-| Leila Guerriero | `leila-guerriero` |
+```
+https://www.elplural.com/tag/benjamin-prado
+                             ^^^^^^^^^^^^^^ → slug
+```
+
+**¿Blog con RSS?** Usa la URL del feed directamente (normalmente `/feed` o `/rss`).
+
+También puedes añadir y eliminar autores directamente desde Telegram con `/add` y `/remove`.
 
 ### 4. Opción A: GitHub Actions (recomendado, gratis)
 
-1. Crea un repo en GitHub (puede ser privado)
-2. Sube `elpais_telegram_bot.py` a la raíz del repo
-3. Crea `.github/workflows/elpais_digest.yml` con el contenido del archivo incluido
-4. Ve a **Settings → Secrets and variables → Actions** y añade:
+1. Haz fork de este repo (o crea uno nuevo y sube los archivos)
+2. Ve a **Settings → Secrets and variables → Actions** y añade:
    - `TELEGRAM_BOT_TOKEN` → tu token del bot
    - `TELEGRAM_CHAT_ID` → tu chat_id
-5. Listo. Se ejecutará cada mañana a las ~7:00 hora España
+3. Listo. Se ejecutará cada mañana a las 9:00 hora de España
 
-Para probarlo manualmente: ve a **Actions → El País Daily Digest → Run workflow**.
+Para probarlo manualmente: **Actions → Vigía Daily Digest → Run workflow**.
 
-### 4. Opción B: Ejecución local con cron (Mac/Linux)
+### 4. Opción B: Ejecución local
 
 ```bash
 # Instalar dependencias
 pip install requests beautifulsoup4
 
-# Variables de entorno (añadir a ~/.zshrc o ~/.bashrc)
+# Variables de entorno
 export TELEGRAM_BOT_TOKEN="tu_token_aquí"
 export TELEGRAM_CHAT_ID="tu_chat_id_aquí"
 
-# Probar manualmente
+# Ejecutar digest una vez
 python elpais_telegram_bot.py
 
-# Programar con cron (cada día a las 7:00)
-crontab -e
-# Añadir esta línea:
-0 7 * * * cd /ruta/al/proyecto && /usr/bin/python3 elpais_telegram_bot.py
+# Modo bot interactivo (escucha comandos de Telegram)
+python elpais_telegram_bot.py --serve
 ```
 
 ## Ejemplo de mensaje
 
 ```
 📰 Tu prensa del día
-Jueves 12 de marzo de 2026
+Viernes 14 de marzo de 2026
 
-✍️ Manuel Jabois
+✍️ Manuel Jabois (El País)
   • Título del artículo — Columna
     Entradilla del artículo...
 
-✍️ Juan José Millás
-  • Otro artículo interesante — Opinión
+✍️ Benjamín Prado (El Plural)
+  • Otro artículo interesante
     Breve descripción...
+
+✍️ Antonio Ortiz (Error 500)
+  • Post del blog
+    Resumen del post...
+```
+
+## Alertas de errores
+
+Si alguna fuente falla (URL rota, página caída, etc.), Vigía te envía un aviso por Telegram:
+
+```
+⚠️ Vigía — Errores al consultar fuentes
+
+1 fuente(s) fallaron:
+
+  🔴 El País — Autor: 404 Client Error
+
+Revisa que las URLs de autor sigan siendo válidas.
+```
+
+## Arquitectura
+
+```
+elpais_telegram_bot.py   # Script principal (scraping + bot + digest)
+authors.json             # Autores configurados (editable desde Telegram)
+.github/workflows/       # GitHub Actions para ejecución automática
 ```
 
 ## Notas
 
-- El script guarda un archivo `.elpais_seen_articles.json` para no enviar duplicados entre ejecuciones. En GitHub Actions este archivo no persiste (cada ejecución es limpia), pero el filtro temporal de 26 horas evita repeticiones igualmente.
-- Si El País cambia la estructura de su web, el parser podría necesitar ajustes. Es HTML scraping, no una API oficial.
-- El script es respetuoso: hace una petición por autor, sin concurrencia agresiva.
+- El archivo `.elpais_seen_articles.json` (caché local) evita enviar duplicados. En GitHub Actions no persiste entre ejecuciones, pero el filtro temporal de 26h lo compensa.
+- Si El País o El Plural cambian la estructura de su web, el parser podría necesitar ajustes. Es scraping HTML, no una API oficial.
+- El script es respetuoso con los servidores: hace una petición por autor, sin concurrencia agresiva.
+- El cron de GitHub Actions tiene dos entradas (7:00 y 8:00 UTC) para cubrir el cambio horario de España (CET/CEST → siempre 9:00 local).
