@@ -28,6 +28,7 @@ import sys
 import json
 import logging
 import hashlib
+import random
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -412,6 +413,73 @@ def fetch_rss_articles(
     return articles
 
 
+# ── Random: artículo aleatorio de El País ─────────────────────────
+
+
+def fetch_random_elpais_article(slug: str) -> Optional[dict]:
+    """Elige un artículo al azar de la página de un autor de El País.
+
+    Escoge una página aleatoria (de la 1 a la 20) y luego un artículo
+    aleatorio de esa página. Si la página no tiene artículos, prueba
+    con otra (hasta 3 intentos).
+    """
+    pages_to_try = random.sample(range(1, 21), k=min(3, 20))
+
+    for page_num in pages_to_try:
+        url = f"https://elpais.com/autor/{slug}/{page_num}/"
+        html, _ = _fetch_page(url)
+        if not html:
+            continue
+
+        soup = BeautifulSoup(html, "html.parser")
+        articles = []
+
+        for article_el in soup.select("article"):
+            link_el = article_el.select_one("h2 a")
+            if not link_el:
+                continue
+
+            title = link_el.get_text(strip=True)
+            href = link_el.get("href", "")
+            if href.startswith("/"):
+                href = f"https://elpais.com{href}"
+
+            # Subtítulo
+            subtitle_el = article_el.select_one("p")
+            subtitle = subtitle_el.get_text(strip=True) if subtitle_el else ""
+
+            # Sección
+            tag_el = article_el.select_one("span.c_ty, .c_ty, .a_ti_s")
+            tag = tag_el.get_text(strip=True) if tag_el else ""
+
+            # Fecha
+            time_el = article_el.select_one("time")
+            date_str = ""
+            if time_el:
+                dt_attr = time_el.get("datetime", "")
+                if dt_attr:
+                    try:
+                        pub = datetime.fromisoformat(
+                            dt_attr.replace("Z", "+00:00")
+                        )
+                        date_str = pub.strftime("%d/%m/%Y")
+                    except ValueError:
+                        pass
+
+            articles.append({
+                "title": title,
+                "url": href,
+                "subtitle": subtitle,
+                "tag": tag,
+                "date_str": date_str,
+            })
+
+        if articles:
+            return random.choice(articles)
+
+    return None
+
+
 def format_telegram_message(all_articles: list[dict]) -> str:
     """Formatea el mensaje de Telegram con Markdown."""
     now = datetime.now(timezone.utc).astimezone(
@@ -644,6 +712,57 @@ def _handle_command(text: str, chat_id: int) -> None:
         result = remove_author(name)
         send_telegram_message(_escape_md(result))
 
+    elif cmd == "/random":
+        # /random <nombre> — artículo aleatorio de un autor de El País
+        parts = text.strip().split()
+        if len(parts) < 2:
+            # Sin nombre: elegir autor al azar de El País
+            if not ELPAIS_AUTHORS:
+                send_telegram_message(
+                    _escape_md("❌ No hay autores de El País configurados.")
+                )
+                return
+            author_name = random.choice(list(ELPAIS_AUTHORS.keys()))
+        else:
+            query = " ".join(parts[1:]).lower()
+            # Buscar coincidencia parcial (ej. "jabois" → "Manuel Jabois")
+            matches = [
+                name for name in ELPAIS_AUTHORS
+                if query in name.lower()
+            ]
+            if not matches:
+                send_telegram_message(
+                    _escape_md(f"❌ No encontré a '{' '.join(parts[1:])}' en El País.\n"
+                               "Usa /status para ver los autores disponibles.")
+                )
+                return
+            author_name = matches[0]
+
+        slug = ELPAIS_AUTHORS[author_name]
+        send_telegram_message(
+            f"🎲 _Buscando artículo aleatorio de {_escape_md(author_name)}\\.\\.\\._"
+        )
+
+        article = fetch_random_elpais_article(slug)
+        if article:
+            lines = [
+                f"🎲 *Artículo aleatorio de {_escape_md(author_name)}*",
+                "",
+            ]
+            if article["tag"]:
+                lines.append(f"_{_escape_md(article['tag'])}_")
+            title_esc = _escape_md(article["title"])
+            lines.append(f"📰 [{title_esc}]({article['url']})")
+            if article["subtitle"]:
+                lines.append(f"_{_escape_md(article['subtitle'][:150])}_")
+            if article["date_str"]:
+                lines.append(f"\n📅 {_escape_md(article['date_str'])}")
+            send_telegram_message("\n".join(lines))
+        else:
+            send_telegram_message(
+                _escape_md(f"❌ No pude obtener artículos de {author_name}.")
+            )
+
     elif cmd == "/status":
         lines = ["🔎 *Vigía — Estado*", ""]
         lines.append(f"*El País* \\({_escape_md(str(len(ELPAIS_AUTHORS)))} autores\\)")
@@ -672,17 +791,16 @@ def _handle_command(text: str, chat_id: int) -> None:
             "📋 *Comandos disponibles:*\n"
             "\n"
             "/update — Consultar artículos ahora\n"
+            "/random — Artículo aleatorio de un autor\n"
             "/status — Ver autores configurados\n"
             "/add — Añadir un autor\n"
             "/remove — Eliminar un autor\n"
             "/help — Este mensaje\n"
             "\n"
-            "📝 *Ejemplos de /add:*\n"
+            "📝 *Ejemplos:*\n"
+            "`/random Jabois` — aleatorio de Jabois\n"
+            "`/random` — autor y artículo al azar\n"
             "`/add elpais Elvira Lindo elvira\\-lindo`\n"
-            "`/add elplural Nombre slug`\n"
-            "`/add rss Mi Blog https://blog\\.com/feed`\n"
-            "\n"
-            "📝 *Ejemplo de /remove:*\n"
             "`/remove Elvira Lindo`"
         )
         send_telegram_message(help_text)
