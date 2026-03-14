@@ -28,7 +28,9 @@ import sys
 import json
 import logging
 import hashlib
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
 
@@ -44,30 +46,16 @@ from bs4 import BeautifulSoup
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# ── Autores de El País ─────────────────────────────────────────────
-# Clave: nombre para mostrar | Valor: slug del autor en El País
-# URL: https://elpais.com/autor/<slug>/
-ELPAIS_AUTHORS: dict[str, str] = {
-    "Manuel Jabois": "manuel-jabois-sueiro",
-    "Juan José Millás": "juan-jose-millas",
-    "Javier Cercas": "javier-cercas",
-    "Rosa Montero": "rosa-montero",
-    "Leila Guerriero": "leila-guerriero",
-    "Sergio del Molino": "sergio-del-molino-molina",
-    "Kiko Llaneras": "francisco-llaneras-estrada",
-    "José Luis Sastre": "jose-luis-sastre-cebolla",
-    # --- Añade aquí más autores de El País ---
-    # "Luz Sánchez-Mellado": "luz-sanchez-mellado",
-    # "Elvira Lindo": "elvira-lindo",
-}
+# ── Autores (cargados desde authors.json) ─────────────────────────
+# El archivo authors.json contiene tres secciones:
+#   "elpais":   { "Nombre": "slug" }
+#   "elplural": { "Nombre": "slug" }
+#   "rss":      { "Nombre": "url-del-feed" }
+# Se pueden añadir/eliminar con los comandos /add y /remove del bot.
 
-# ── Autores de El Plural ──────────────────────────────────────────
-# Clave: nombre para mostrar | Valor: slug del tag en El Plural
-# URL: https://www.elplural.com/tag/<slug>
-ELPLURAL_AUTHORS: dict[str, str] = {
-    "Benjamín Prado": "benjamin-prado",
-    # --- Añade aquí más autores de El Plural ---
-}
+ELPAIS_AUTHORS: dict[str, str] = {}
+ELPLURAL_AUTHORS: dict[str, str] = {}
+RSS_AUTHORS: dict[str, str] = {}
 
 # Ventana temporal: artículos publicados en las últimas N horas
 LOOKBACK_HOURS = 26  # 26h para cubrir holgadamente un día completo
@@ -80,6 +68,7 @@ USER_AGENT = (
 
 # Archivo local para evitar enviar duplicados entre ejecuciones
 SEEN_FILE = Path(__file__).parent / ".elpais_seen_articles.json"
+AUTHORS_FILE = Path(__file__).parent / "authors.json"
 
 # Logging
 logging.basicConfig(
@@ -91,6 +80,85 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Funciones auxiliares
 # ---------------------------------------------------------------------------
+
+
+def load_authors() -> None:
+    """Carga los autores desde authors.json a las variables globales."""
+    global ELPAIS_AUTHORS, ELPLURAL_AUTHORS, RSS_AUTHORS
+    if AUTHORS_FILE.exists():
+        try:
+            data = json.loads(AUTHORS_FILE.read_text(encoding="utf-8"))
+            ELPAIS_AUTHORS = data.get("elpais", {})
+            ELPLURAL_AUTHORS = data.get("elplural", {})
+            RSS_AUTHORS = data.get("rss", {})
+            log.info(
+                f"Autores cargados: {len(ELPAIS_AUTHORS)} El País, "
+                f"{len(ELPLURAL_AUTHORS)} El Plural, {len(RSS_AUTHORS)} RSS"
+            )
+        except (json.JSONDecodeError, KeyError) as e:
+            log.error(f"Error al leer {AUTHORS_FILE}: {e}")
+    else:
+        log.warning(f"No se encontró {AUTHORS_FILE}. Sin autores configurados.")
+
+
+def save_authors() -> None:
+    """Guarda los autores actuales a authors.json."""
+    data = {
+        "elpais": ELPAIS_AUTHORS,
+        "elplural": ELPLURAL_AUTHORS,
+        "rss": RSS_AUTHORS,
+    }
+    AUTHORS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    log.info("Autores guardados en authors.json")
+
+
+def add_author(source: str, name: str, slug_or_url: str) -> str:
+    """Añade un autor. Devuelve mensaje de resultado."""
+    source = source.lower()
+    if source == "elpais":
+        if name in ELPAIS_AUTHORS:
+            return f"⚠️ {name} ya está en El País."
+        ELPAIS_AUTHORS[name] = slug_or_url
+        save_authors()
+        return f"✅ {name} añadido a El País (slug: {slug_or_url})"
+    elif source == "elplural":
+        if name in ELPLURAL_AUTHORS:
+            return f"⚠️ {name} ya está en El Plural."
+        ELPLURAL_AUTHORS[name] = slug_or_url
+        save_authors()
+        return f"✅ {name} añadido a El Plural (slug: {slug_or_url})"
+    elif source == "rss":
+        if name in RSS_AUTHORS:
+            return f"⚠️ {name} ya está en RSS."
+        RSS_AUTHORS[name] = slug_or_url
+        save_authors()
+        return f"✅ {name} añadido como RSS (feed: {slug_or_url})"
+    else:
+        return (
+            f"❌ Fuente '{source}' no reconocida.\n"
+            "Usa: elpais, elplural o rss"
+        )
+
+
+def remove_author(name: str) -> str:
+    """Elimina un autor de cualquier fuente. Devuelve mensaje de resultado."""
+    if name in ELPAIS_AUTHORS:
+        del ELPAIS_AUTHORS[name]
+        save_authors()
+        return f"🗑 {name} eliminado de El País."
+    elif name in ELPLURAL_AUTHORS:
+        del ELPLURAL_AUTHORS[name]
+        save_authors()
+        return f"🗑 {name} eliminado de El Plural."
+    elif name in RSS_AUTHORS:
+        del RSS_AUTHORS[name]
+        save_authors()
+        return f"🗑 {name} eliminado de RSS."
+    else:
+        return f"❌ No se encontró a '{name}' en ninguna fuente."
 
 
 def load_seen_articles() -> set[str]:
@@ -114,28 +182,34 @@ def article_hash(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 
-def _fetch_page(url: str) -> Optional[str]:
-    """Descarga una URL y devuelve el HTML."""
+def _fetch_page(url: str) -> tuple[Optional[str], Optional[str]]:
+    """Descarga una URL y devuelve (html, error).
+
+    Si todo va bien: (html, None).
+    Si falla:        (None, descripción del error).
+    """
     headers = {"User-Agent": USER_AGENT}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
-        return resp.text
+        return resp.text, None
     except requests.RequestException as e:
         log.warning(f"Error al descargar {url}: {e}")
-        return None
+        return None, str(e)
 
 
 # ── Scraper: El País ──────────────────────────────────────────────
 
 
 def fetch_elpais_articles(
-    author_name: str, slug: str, cutoff: datetime
+    author_name: str, slug: str, cutoff: datetime, errors: Optional[list] = None
 ) -> list[dict]:
     """Extrae artículos recientes de la página de autor de El País."""
     url = f"https://elpais.com/autor/{slug}/"
-    html = _fetch_page(url)
+    html, err = _fetch_page(url)
     if not html:
+        if errors is not None and err:
+            errors.append(f"El País — {author_name}: {err}")
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -192,7 +266,7 @@ def fetch_elpais_articles(
 
 
 def fetch_elplural_articles(
-    author_name: str, slug: str, cutoff: datetime
+    author_name: str, slug: str, cutoff: datetime, errors: Optional[list] = None
 ) -> list[dict]:
     """
     Extrae artículos recientes del tag de autor en El Plural.
@@ -203,8 +277,10 @@ def fetch_elplural_articles(
     ordenados de más reciente a más antiguo).
     """
     url = f"https://www.elplural.com/tag/{slug}"
-    html = _fetch_page(url)
+    html, err = _fetch_page(url)
     if not html:
+        if errors is not None and err:
+            errors.append(f"El Plural — {author_name}: {err}")
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -248,7 +324,7 @@ def fetch_elplural_articles(
 
 def _fetch_elplural_article_date(url: str) -> Optional[datetime]:
     """Extrae la fecha de publicación de un artículo de El Plural."""
-    html = _fetch_page(url)
+    html, _ = _fetch_page(url)
     if not html:
         return None
     soup = BeautifulSoup(html, "html.parser")
@@ -259,6 +335,81 @@ def _fetch_elplural_article_date(url: str) -> Optional[datetime]:
         except ValueError:
             pass
     return None
+
+
+# ── Scraper: RSS (Substack, blogs, etc.) ──────────────────────────
+
+
+def fetch_rss_articles(
+    author_name: str, feed_url: str, cutoff: datetime, errors: Optional[list] = None
+) -> list[dict]:
+    """Extrae artículos recientes de un feed RSS/Atom."""
+    xml_text, err = _fetch_page(feed_url)
+    if not xml_text:
+        if errors is not None and err:
+            errors.append(f"RSS — {author_name}: {err}")
+        return []
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        log.warning(f"Error al parsear RSS de {feed_url}: {e}")
+        if errors is not None:
+            errors.append(f"RSS — {author_name}: XML inválido")
+        return []
+
+    articles = []
+
+    # Detectar nombre de la fuente desde el feed
+    channel = root.find("channel")
+    source_name = "Blog"
+    if channel is not None:
+        title_el = channel.find("title")
+        if title_el is not None and title_el.text:
+            source_name = title_el.text.strip()
+
+    for item in root.findall(".//item"):
+        title_el = item.find("title")
+        link_el = item.find("link")
+        pub_el = item.find("pubDate")
+        desc_el = item.find("description")
+
+        if not title_el or not link_el:
+            continue
+
+        title = title_el.text or ""
+        href = link_el.text or ""
+
+        # Parsear fecha RFC 2822 (formato RSS estándar)
+        pub_date = None
+        if pub_el is not None and pub_el.text:
+            try:
+                pub_date = parsedate_to_datetime(pub_el.text)
+            except (ValueError, TypeError):
+                pass
+
+        if pub_date and pub_date < cutoff:
+            continue
+
+        subtitle = ""
+        if desc_el is not None and desc_el.text:
+            # Limpiar HTML básico de la descripción
+            from html import unescape
+            subtitle = unescape(desc_el.text)
+            # Eliminar tags HTML
+            subtitle = BeautifulSoup(subtitle, "html.parser").get_text(strip=True)
+
+        articles.append({
+            "title": title.strip(),
+            "url": href.strip(),
+            "author": author_name,
+            "source": source_name,
+            "date": pub_date,
+            "subtitle": subtitle[:150],
+            "tag": "",
+        })
+
+    return articles
 
 
 def format_telegram_message(all_articles: list[dict]) -> str:
@@ -335,21 +486,27 @@ def send_telegram_message(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Flujo principal
+# Lógica del digest (reutilizable)
 # ---------------------------------------------------------------------------
 
 
-def main():
+def run_digest(notify_empty: bool = False) -> None:
+    """Ejecuta el ciclo completo: scraping → formateo → envío por Telegram.
+
+    Args:
+        notify_empty: si True, envía mensaje incluso cuando no hay artículos.
+    """
     log.info("Iniciando Vigía — revisión de artículos...")
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen = load_seen_articles()
     all_new_articles: list[dict] = []
+    fetch_errors: list[str] = []
 
     # ── El País ───────────────────────────────────────────────────
     for author_name, slug in ELPAIS_AUTHORS.items():
         log.info(f"[El País] Consultando: {author_name} ({slug})")
-        articles = fetch_elpais_articles(author_name, slug, cutoff)
+        articles = fetch_elpais_articles(author_name, slug, cutoff, fetch_errors)
         for art in articles:
             h = article_hash(art["url"])
             if h not in seen:
@@ -360,7 +517,18 @@ def main():
     # ── El Plural ─────────────────────────────────────────────────
     for author_name, slug in ELPLURAL_AUTHORS.items():
         log.info(f"[El Plural] Consultando: {author_name} ({slug})")
-        articles = fetch_elplural_articles(author_name, slug, cutoff)
+        articles = fetch_elplural_articles(author_name, slug, cutoff, fetch_errors)
+        for art in articles:
+            h = article_hash(art["url"])
+            if h not in seen:
+                all_new_articles.append(art)
+                seen.add(h)
+        log.info(f"  → {len(articles)} artículo(s) reciente(s)")
+
+    # ── RSS (blogs) ───────────────────────────────────────────────
+    for author_name, feed_url in RSS_AUTHORS.items():
+        log.info(f"[RSS] Consultando: {author_name}")
+        articles = fetch_rss_articles(author_name, feed_url, cutoff, fetch_errors)
         for art in articles:
             h = article_hash(art["url"])
             if h not in seen:
@@ -383,15 +551,194 @@ def main():
         if success:
             save_seen_articles(seen)
     else:
-        log.info("No hay artículos nuevos hoy.")
-        # Opción: enviar igualmente un mensaje de "nada nuevo"
-        # Descomenta las siguientes líneas si quieres recibir notificación
-        # incluso cuando no haya artículos nuevos:
-        # message = format_telegram_message([])
-        # send_telegram_message(message)
+        log.info("No hay artículos nuevos.")
+        if notify_empty:
+            message = format_telegram_message([])
+            send_telegram_message(message)
 
     save_seen_articles(seen)
+
+    # ── Alertas de errores ────────────────────────────────────────
+    if fetch_errors:
+        error_lines = [
+            "⚠️ *Vigía — Errores al consultar fuentes*",
+            "",
+            f"_{_escape_md(str(len(fetch_errors)))} fuente\\(s\\) fallaron:_",
+            "",
+        ]
+        for err in fetch_errors:
+            error_lines.append(f"  🔴 {_escape_md(err)}")
+        error_lines.append("")
+        error_lines.append(
+            "_Revisa que las URLs de autor sigan siendo válidas\\._"
+        )
+        send_telegram_message("\n".join(error_lines))
+        log.warning(f"{len(fetch_errors)} fuente(s) con errores.")
+
     log.info("Hecho.")
+
+
+# ---------------------------------------------------------------------------
+# Modo bot interactivo (polling de Telegram)
+# ---------------------------------------------------------------------------
+
+
+def _get_updates(offset: int = 0) -> list[dict]:
+    """Obtiene mensajes nuevos de Telegram con long polling."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    params = {"offset": offset, "timeout": 30, "allowed_updates": ["message"]}
+    try:
+        resp = requests.get(url, params=params, timeout=35)
+        data = resp.json()
+        return data.get("result", [])
+    except requests.RequestException as e:
+        log.warning(f"Error en getUpdates: {e}")
+        return []
+
+
+def _handle_command(text: str, chat_id: int) -> None:
+    """Procesa un comando recibido por Telegram."""
+    cmd = text.strip().split()[0].lower().split("@")[0]  # /update@BotName → /update
+
+    if cmd == "/update":
+        send_telegram_message("🔄 _Consultando fuentes\\.\\.\\._")
+        run_digest(notify_empty=True)
+
+    elif cmd == "/add":
+        # /add <fuente> <nombre> <slug_o_url>
+        # Ejemplo: /add elpais Elvira Lindo elvira-lindo
+        # Ejemplo: /add rss Kiko Llaneras https://example.com/feed
+        parts = text.strip().split()
+        if len(parts) < 4:
+            send_telegram_message(
+                "ℹ️ *Uso de /add:*\n\n"
+                "`/add elpais Nombre Apellido slug`\n"
+                "`/add elplural Nombre Apellido slug`\n"
+                "`/add rss Nombre Apellido url\\-del\\-feed`\n\n"
+                "*Ejemplos:*\n"
+                "`/add elpais Elvira Lindo elvira\\-lindo`\n"
+                "`/add rss Mi Blog https://blog\\.com/feed`"
+            )
+            return
+        source = parts[1]
+        # El slug/url es siempre la última palabra,
+        # el nombre es todo lo que hay entre fuente y slug/url
+        slug_or_url = parts[-1]
+        name = " ".join(parts[2:-1])
+        result = add_author(source, name, slug_or_url)
+        send_telegram_message(_escape_md(result))
+
+    elif cmd == "/remove":
+        # /remove <nombre>
+        # Ejemplo: /remove Elvira Lindo
+        parts = text.strip().split()
+        if len(parts) < 2:
+            send_telegram_message(
+                "ℹ️ *Uso de /remove:*\n\n"
+                "`/remove Nombre Apellido`\n\n"
+                "*Ejemplo:*\n"
+                "`/remove Elvira Lindo`"
+            )
+            return
+        name = " ".join(parts[1:])
+        result = remove_author(name)
+        send_telegram_message(_escape_md(result))
+
+    elif cmd == "/status":
+        lines = ["🔎 *Vigía — Estado*", ""]
+        lines.append(f"*El País* \\({_escape_md(str(len(ELPAIS_AUTHORS)))} autores\\)")
+        for name in ELPAIS_AUTHORS:
+            lines.append(f"  • {_escape_md(name)}")
+        lines.append("")
+        lines.append(
+            f"*El Plural* \\({_escape_md(str(len(ELPLURAL_AUTHORS)))} autores\\)"
+        )
+        for name in ELPLURAL_AUTHORS:
+            lines.append(f"  • {_escape_md(name)}")
+        lines.append("")
+        lines.append(
+            f"*Blogs RSS* \\({_escape_md(str(len(RSS_AUTHORS)))} autores\\)"
+        )
+        for name in RSS_AUTHORS:
+            lines.append(f"  • {_escape_md(name)}")
+        lines.append("")
+        lines.append(f"⏱ Ventana: últimas {LOOKBACK_HOURS}h")
+        send_telegram_message("\n".join(lines))
+
+    elif cmd == "/help" or cmd == "/start":
+        help_text = (
+            "👋 *Vigía — Tu resumen de prensa*\n"
+            "\n"
+            "📋 *Comandos disponibles:*\n"
+            "\n"
+            "/update — Consultar artículos ahora\n"
+            "/status — Ver autores configurados\n"
+            "/add — Añadir un autor\n"
+            "/remove — Eliminar un autor\n"
+            "/help — Este mensaje\n"
+            "\n"
+            "📝 *Ejemplos de /add:*\n"
+            "`/add elpais Elvira Lindo elvira\\-lindo`\n"
+            "`/add elplural Nombre slug`\n"
+            "`/add rss Mi Blog https://blog\\.com/feed`\n"
+            "\n"
+            "📝 *Ejemplo de /remove:*\n"
+            "`/remove Elvira Lindo`"
+        )
+        send_telegram_message(help_text)
+
+
+def serve() -> None:
+    """Arranca el bot en modo polling (interactivo)."""
+    log.info("Vigía arrancado en modo bot. Esperando comandos...")
+    log.info("Envía /update desde Telegram para forzar un digest.")
+
+    offset = 0
+
+    # Descartar mensajes antiguos al arrancar
+    old = _get_updates(offset)
+    if old:
+        offset = old[-1]["update_id"] + 1
+        log.info(f"Descartados {len(old)} mensaje(s) antiguo(s).")
+
+    while True:
+        try:
+            updates = _get_updates(offset)
+            for update in updates:
+                offset = update["update_id"] + 1
+                msg = update.get("message", {})
+                chat_id = msg.get("chat", {}).get("id")
+                text = msg.get("text", "")
+
+                # Solo responder al chat autorizado
+                if str(chat_id) != str(TELEGRAM_CHAT_ID):
+                    log.info(f"Mensaje ignorado de chat_id={chat_id}")
+                    continue
+
+                if text.startswith("/"):
+                    log.info(f"Comando recibido: {text}")
+                    _handle_command(text, chat_id)
+
+        except KeyboardInterrupt:
+            log.info("Vigía detenido. ¡Hasta luego!")
+            break
+        except Exception as e:
+            log.error(f"Error en el bucle de polling: {e}")
+            import time
+            time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
+# Punto de entrada
+# ---------------------------------------------------------------------------
+
+
+def main():
+    load_authors()
+    if "--serve" in sys.argv:
+        serve()
+    else:
+        run_digest()
 
 
 if __name__ == "__main__":
