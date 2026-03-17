@@ -1,16 +1,14 @@
 # .github/workflows/elpais_digest.yml
 #
-# Ejecuta el bot cada mañana a las 9:00 (hora de España peninsular).
-# GitHub Actions usa UTC: 9:00 CET = 8:00 UTC (invierno) / 7:00 UTC (verano).
-# Programamos ambas horas para cubrir el cambio horario.
+# Ejecuta el bot cada mañana (hora de España peninsular).
+# GitHub Actions usa UTC: 7:00 UTC = 9:00 CEST (verano) / 8:00 CET (invierno).
+# Un solo cron para evitar notificaciones duplicadas.
 
 name: Vigía Daily Digest
 
 on:
   schedule:
-    # 8:00 UTC = 9:00 CET (invierno, oct-mar)
-    - cron: "0 8 * * *"
-    # 7:00 UTC = 9:00 CEST (verano, mar-oct)
+    # 7:00 UTC → 9:00 en verano, 8:00 en invierno
     - cron: "0 7 * * *"
 
   # Permite ejecución manual desde la pestaña Actions de GitHub
