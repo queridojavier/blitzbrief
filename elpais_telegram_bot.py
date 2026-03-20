@@ -57,6 +57,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 ELPAIS_AUTHORS: dict[str, str] = {}
 ELPLURAL_AUTHORS: dict[str, str] = {}
 RSS_AUTHORS: dict[str, str] = {}
+PODCAST_SOURCES: dict[str, dict] = {}
 
 # Ventana temporal: artículos publicados en las últimas N horas
 LOOKBACK_HOURS = 26  # 26h para cubrir holgadamente un día completo
@@ -85,16 +86,18 @@ log = logging.getLogger(__name__)
 
 def load_authors() -> None:
     """Carga los autores desde authors.json a las variables globales."""
-    global ELPAIS_AUTHORS, ELPLURAL_AUTHORS, RSS_AUTHORS
+    global ELPAIS_AUTHORS, ELPLURAL_AUTHORS, RSS_AUTHORS, PODCAST_SOURCES
     if AUTHORS_FILE.exists():
         try:
             data = json.loads(AUTHORS_FILE.read_text(encoding="utf-8"))
             ELPAIS_AUTHORS = data.get("elpais", {})
             ELPLURAL_AUTHORS = data.get("elplural", {})
             RSS_AUTHORS = data.get("rss", {})
+            PODCAST_SOURCES = data.get("podcast", {})
             log.info(
                 f"Autores cargados: {len(ELPAIS_AUTHORS)} El País, "
-                f"{len(ELPLURAL_AUTHORS)} El Plural, {len(RSS_AUTHORS)} RSS"
+                f"{len(ELPLURAL_AUTHORS)} El Plural, {len(RSS_AUTHORS)} RSS, "
+                f"{len(PODCAST_SOURCES)} Podcast"
             )
         except (json.JSONDecodeError, KeyError) as e:
             log.error(f"Error al leer {AUTHORS_FILE}: {e}")
@@ -108,6 +111,7 @@ def save_authors() -> None:
         "elpais": ELPAIS_AUTHORS,
         "elplural": ELPLURAL_AUTHORS,
         "rss": RSS_AUTHORS,
+        "podcast": PODCAST_SOURCES,
     }
     AUTHORS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -375,7 +379,7 @@ def fetch_rss_articles(
         pub_el = item.find("pubDate")
         desc_el = item.find("description")
 
-        if not title_el or not link_el:
+        if title_el is None or link_el is None:
             continue
 
         title = title_el.text or ""
@@ -411,6 +415,128 @@ def fetch_rss_articles(
         })
 
     return articles
+
+
+# ── Scraper: Podcast (RSS + filtro por título) ────────────────────
+
+
+def fetch_podcast_segments(
+    label: str, feed_url: str, title_filter: str,
+    cutoff: datetime, errors: Optional[list] = None,
+) -> list[dict]:
+    """Extrae segmentos de podcast que coincidan con un filtro en el título."""
+    xml_text, err = _fetch_page(feed_url)
+    if not xml_text:
+        if errors is not None and err:
+            errors.append(f"Podcast — {label}: {err}")
+        return []
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        log.warning(f"Error al parsear podcast feed {feed_url}: {e}")
+        if errors is not None:
+            errors.append(f"Podcast — {label}: XML inválido")
+        return []
+
+    segments = []
+    filter_lower = title_filter.lower()
+
+    for item in root.findall(".//item"):
+        title_el = item.find("title")
+        if title_el is None or not title_el.text:
+            continue
+        title = title_el.text.strip()
+
+        # Comprobar que el título empieza con el filtro (ej. "La Contra |")
+        # para evitar falsos positivos ("guerra contra Irán", etc.)
+        if not title.lower().startswith(filter_lower):
+            continue
+
+        # Fecha
+        pub_el = item.find("pubDate")
+        pub_date = None
+        if pub_el is not None and pub_el.text:
+            try:
+                pub_date = parsedate_to_datetime(pub_el.text)
+            except (ValueError, TypeError):
+                pass
+
+        if pub_date and pub_date < cutoff:
+            continue
+
+        # URL del audio (enclosure)
+        enclosure = item.find("enclosure")
+        audio_url = ""
+        if enclosure is not None:
+            audio_url = enclosure.get("url", "")
+
+        # Duración
+        duration = ""
+        for tag_name in ["itunes:duration", "duration"]:
+            dur_el = item.find(tag_name)
+            if dur_el is not None and dur_el.text:
+                duration = dur_el.text.strip()
+                break
+        # Buscar con namespace itunes si no se encontró
+        if not duration:
+            ns = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+            dur_el = item.find("itunes:duration", ns)
+            if dur_el is not None and dur_el.text:
+                duration = dur_el.text.strip()
+
+        segments.append({
+            "title": title,
+            "audio_url": audio_url,
+            "label": label,
+            "date": pub_date,
+            "duration": duration,
+        })
+
+    return segments
+
+
+def send_telegram_audio(audio_url: str, title: str, duration_str: str) -> bool:
+    """Envía un audio por Telegram usando sendAudio (reproductor inline)."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendAudio"
+    payload: dict = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "audio": audio_url,
+        "title": title,
+        "caption": f"🎙 {title}",
+    }
+
+    # Convertir duración "HH:MM:SS" o "MM:SS" a segundos
+    if duration_str:
+        parts = duration_str.split(":")
+        try:
+            if len(parts) == 3:
+                secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            elif len(parts) == 2:
+                secs = int(parts[0]) * 60 + int(parts[1])
+            else:
+                secs = int(parts[0])
+            payload["duration"] = secs
+        except ValueError:
+            pass
+
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            log.info(f"Audio enviado: {title}")
+            return True
+        else:
+            log.error(f"Error de Telegram sendAudio: {data}")
+            return False
+    except requests.RequestException as e:
+        log.error(f"Error al enviar audio: {e}")
+        return False
 
 
 # ── Random: artículo aleatorio de El País ─────────────────────────
@@ -604,6 +730,24 @@ def run_digest(notify_empty: bool = False) -> None:
                 seen.add(h)
         log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
+    # ── Podcasts (audio directo) ────────────────────────────────────
+    podcast_segments: list[dict] = []
+    for label, config in PODCAST_SOURCES.items():
+        feed_url = config.get("feed", "")
+        title_filter = config.get("filter", "")
+        if not feed_url:
+            continue
+        log.info(f"[Podcast] Consultando: {label} (filtro: '{title_filter}')")
+        segments = fetch_podcast_segments(
+            label, feed_url, title_filter, cutoff, fetch_errors
+        )
+        for seg in segments:
+            h = article_hash(seg["audio_url"])
+            if h not in seen:
+                podcast_segments.append(seg)
+                seen.add(h)
+        log.info(f"  → {len(segments)} segmento(s) encontrado(s)")
+
     # Ordenar por fecha (más reciente primero)
     all_new_articles.sort(
         key=lambda a: a.get("date") or datetime.min.replace(tzinfo=timezone.utc),
@@ -623,6 +767,13 @@ def run_digest(notify_empty: bool = False) -> None:
         if notify_empty:
             message = format_telegram_message([])
             send_telegram_message(message)
+
+    # ── Enviar audios de podcast ────────────────────────────────────
+    for seg in podcast_segments:
+        if seg["audio_url"]:
+            send_telegram_audio(
+                seg["audio_url"], seg["title"], seg.get("duration", "")
+            )
 
     save_seen_articles(seen)
 
@@ -779,6 +930,12 @@ def _handle_command(text: str, chat_id: int) -> None:
             f"*Blogs RSS* \\({_escape_md(str(len(RSS_AUTHORS)))} autores\\)"
         )
         for name in RSS_AUTHORS:
+            lines.append(f"  • {_escape_md(name)}")
+        lines.append("")
+        lines.append(
+            f"*Podcasts* \\({_escape_md(str(len(PODCAST_SOURCES)))} fuentes\\)"
+        )
+        for name in PODCAST_SOURCES:
             lines.append(f"  • {_escape_md(name)}")
         lines.append("")
         lines.append(f"⏱ Ventana: últimas {LOOKBACK_HOURS}h")

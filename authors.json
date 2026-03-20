@@ -17,5 +17,11 @@
   },
   "rss": {
     "Antonio Ortiz": "https://www.error500.net/feed"
+  },
+  "podcast": {
+    "Manuel Jabois — La Contra": {
+      "feed": "https://fapi-top.prisasd.com/podcast/playser/hora_25/itunestfp/podcast.xml",
+      "filter": "La Contra |"
+    }
   }
 }
