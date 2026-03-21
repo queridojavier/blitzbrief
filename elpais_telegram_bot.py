@@ -64,7 +64,8 @@ PODCAST_SOURCES: dict[str, dict] = {}
 NEWS_SOURCES: dict[str, str] = {
     "El País": "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
     "eldiario.es": "https://www.eldiario.es/rss/",
-    "Diario Sur": "https://www.diariosur.es/rss/2.0/?section=portada",
+    "Diario Sur": "https://www.diariosur.es/rss/2.0/",
+    "La Opinión de Málaga": "https://www.laopiniondemalaga.es/rss/",
     "El Español": "https://www.elespanol.com/rss/",
     "Málaga Hoy": "https://www.malagahoy.es/rss/",
     "The Guardian": "https://www.theguardian.com/world/rss",
