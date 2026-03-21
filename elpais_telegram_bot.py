@@ -711,31 +711,29 @@ def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
             headlines_text += f" — {h['description']}"
         headlines_text += "\n"
 
-    prompt = f"""Genera un briefing de noticias MUY CONCISO a partir de estos titulares.
+    today = datetime.now(timezone(timedelta(hours=2))).strftime("%d/%m/%Y")
 
-USA ESTOS BLOQUES (incluye SOLO los que tengan noticias relevantes):
+    prompt = f"""Hoy es {today}. Eres el editor de un briefing matutino ultra-breve.
+Tu trabajo es SELECCIONAR la noticia más importante de cada categoría, no comprimir todas.
 
-🌍 INTERNACIONAL
-• 2-3 noticias del mundo
+De todos los titulares, elige LA ÚNICA NOTICIA MÁS RELEVANTE de cada sección y resúmela en una frase corta.
 
-🏛 ESPAÑA
-• 2-3 noticias de política/sociedad nacional
+FORMATO (una línea por sección):
+🌍 Internacional: [la noticia internacional más importante hoy]
+🏛 España: [la noticia nacional más relevante hoy]
+💰 Economía: [solo si hay algo económico realmente destacable]
+📍 Málaga: [solo si hay algo local relevante de Málaga o Andalucía]
+⚽ Deporte: [solo si hay noticias de Real Madrid, Málaga CF o Unicaja]
+🤖 Tech: [solo si hay un lanzamiento, anuncio o novedad REAL de hoy]
 
-📍 MÁLAGA Y ANDALUCÍA
-• 1-2 noticias locales (busca en Málaga Hoy, Diario Sur)
-
-⚽ DEPORTE
-• Noticias de Real Madrid (fútbol y baloncesto), Málaga CF o Unicaja (busca en Marca, AS)
-• Si no hay de estos equipos, omite la sección
-
-🤖 TECNOLOGÍA
-• Novedades de IA, Apple o tecnología (busca en OpenAI Blog, 9to5Mac)
-
-REGLAS:
-- Cada noticia en UNA frase corta (máximo 15 palabras)
+REGLAS ESTRICTAS:
+- UNA sola noticia por sección, la más importante, en UNA frase de máximo 15 palabras
+- OMITE secciones enteras si no hay nada genuinamente novedoso o relevante HOY
+- Para Tech: ignora noticias sobre productos ya lanzados hace días/semanas. Solo incluye si es algo nuevo de hoy
+- Para Deporte: solo incluye si hay partido hoy/mañana o fichaje/resultado de Real Madrid, Málaga CF o Unicaja
 - Todo en español
 - NO uses asteriscos, negritas ni markdown
-- NO añadas introducción, cierre ni línea de fuentes
+- NO añadas introducción, cierre, fuentes ni relleno
 
 TITULARES:
 {headlines_text}"""
