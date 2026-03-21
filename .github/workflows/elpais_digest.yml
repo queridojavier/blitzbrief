@@ -4,7 +4,7 @@
 # GitHub Actions usa UTC: 7:00 UTC = 9:00 CEST (verano) / 8:00 CET (invierno).
 # Un solo cron para evitar notificaciones duplicadas.
 
-name: Vigía Daily Digest
+name: BlitzBrief Daily Digest
 
 on:
   schedule:

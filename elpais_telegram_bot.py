@@ -1,5 +1,5 @@
 """
-📰 Vigía — Resumen diario de tus columnistas favoritos → Telegram
+📰 BlitzBrief — Resumen diario de tus columnistas favoritos → Telegram
 ==================================================================
 
 Este script consulta las páginas de autor de El País y El Plural,
@@ -927,7 +927,7 @@ def run_digest(notify_empty: bool = False) -> None:
     Args:
         notify_empty: si True, envía mensaje incluso cuando no hay artículos.
     """
-    log.info("Iniciando Vigía — revisión de artículos...")
+    log.info("Iniciando BlitzBrief — revisión de artículos...")
 
     # ── Briefing de noticias (antes de las columnas) ─────────────────
     if GEMINI_API_KEY:
@@ -1023,7 +1023,7 @@ def run_digest(notify_empty: bool = False) -> None:
     # ── Alertas de errores ────────────────────────────────────────
     if fetch_errors:
         error_lines = [
-            "⚠️ *Vigía — Errores al consultar fuentes*",
+            "⚠️ *BlitzBrief — Errores al consultar fuentes*",
             "",
             f"_{_escape_md(str(len(fetch_errors)))} fuente\\(s\\) fallaron:_",
             "",
@@ -1171,7 +1171,7 @@ def _handle_command(text: str, chat_id: int) -> None:
             )
 
     elif cmd == "/status":
-        lines = ["🔎 *Vigía — Estado*", ""]
+        lines = ["🔎 *BlitzBrief — Estado*", ""]
         lines.append(f"*El País* \\({_escape_md(str(len(ELPAIS_AUTHORS)))} autores\\)")
         for name in ELPAIS_AUTHORS:
             lines.append(f"  • {_escape_md(name)}")
@@ -1199,7 +1199,7 @@ def _handle_command(text: str, chat_id: int) -> None:
 
     elif cmd == "/help" or cmd == "/start":
         help_text = (
-            "👋 *Vigía — Tu resumen de prensa*\n"
+            "👋 *BlitzBrief — Tu resumen de prensa*\n"
             "\n"
             "📋 *Comandos disponibles:*\n"
             "\n"
@@ -1223,7 +1223,7 @@ def _handle_command(text: str, chat_id: int) -> None:
 
 def serve() -> None:
     """Arranca el bot en modo polling (interactivo)."""
-    log.info("Vigía arrancado en modo bot. Esperando comandos...")
+    log.info("BlitzBrief arrancado en modo bot. Esperando comandos...")
     log.info("Envía /update desde Telegram para forzar un digest.")
 
     offset = 0
@@ -1253,7 +1253,7 @@ def serve() -> None:
                     _handle_command(text, chat_id)
 
         except KeyboardInterrupt:
-            log.info("Vigía detenido. ¡Hasta luego!")
+            log.info("BlitzBrief detenido. ¡Hasta luego!")
             break
         except Exception as e:
             log.error(f"Error en el bucle de polling: {e}")
