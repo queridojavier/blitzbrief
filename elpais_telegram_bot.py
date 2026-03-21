@@ -46,6 +46,7 @@ from bs4 import BeautifulSoup
 # Se leen de variables de entorno (ideal para GitHub Actions / CI).
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # ── Autores (cargados desde authors.json) ─────────────────────────
 # El archivo authors.json contiene tres secciones:
@@ -58,6 +59,23 @@ ELPAIS_AUTHORS: dict[str, str] = {}
 ELPLURAL_AUTHORS: dict[str, str] = {}
 RSS_AUTHORS: dict[str, str] = {}
 PODCAST_SOURCES: dict[str, dict] = {}
+
+# ── Fuentes de noticias para el briefing ──────────────────────────
+NEWS_SOURCES: dict[str, str] = {
+    "El País": "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
+    "eldiario.es": "https://www.eldiario.es/rss/",
+    "Diario Sur": "https://www.diariosur.es/rss/2.0/?section=portada",
+    "El Español": "https://www.elespanol.com/rss/",
+    "Málaga Hoy": "https://www.malagahoy.es/rss/",
+    "The Guardian": "https://www.theguardian.com/world/rss",
+    "New York Times": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    "Marca": "https://e00-marca.uecdn.es/rss/portada.xml",
+    "Diario AS": "https://news.google.com/rss/search?q=site:as.com&hl=es&gl=ES&ceid=ES:es",
+    "El Confidencial": "https://rss.elconfidencial.com/",
+    "OpenAI Blog": "https://openai.com/blog/rss.xml",
+    "9to5Mac": "https://9to5mac.com/feed/",
+    "Anthropic News": "https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml",
+}
 
 # Ventana temporal: artículos publicados en las últimas N horas
 LOOKBACK_HOURS = 26  # 26h para cubrir holgadamente un día completo
@@ -606,6 +624,224 @@ def fetch_random_elpais_article(slug: str) -> Optional[dict]:
     return None
 
 
+# ── Briefing de noticias con IA ────────────────────────────────────
+
+
+def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
+    """Recoge titulares recientes de todas las fuentes de noticias."""
+    headlines: list[dict] = []
+
+    for source_name, feed_url in NEWS_SOURCES.items():
+        xml_text, err = _fetch_page(feed_url)
+        if not xml_text:
+            log.warning(f"[Briefing] No se pudo descargar {source_name}: {err}")
+            continue
+
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            log.warning(f"[Briefing] XML inválido de {source_name}")
+            continue
+
+        count = 0
+        # RSS estándar
+        for item in root.findall(".//item"):
+            if count >= max_per_source:
+                break
+            title_el = item.find("title")
+            desc_el = item.find("description")
+            if title_el is None or not title_el.text:
+                continue
+            title = title_el.text.strip()
+            desc = ""
+            if desc_el is not None and desc_el.text:
+                desc = BeautifulSoup(desc_el.text, "html.parser").get_text(strip=True)
+                desc = desc[:200]
+            headlines.append({
+                "source": source_name,
+                "title": title,
+                "description": desc,
+            })
+            count += 1
+
+        # Atom (por si algún feed usa <entry> en vez de <item>)
+        if count == 0:
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            for entry in root.findall(".//atom:entry", ns):
+                if count >= max_per_source:
+                    break
+                title_el = entry.find("atom:title", ns)
+                summary_el = entry.find("atom:summary", ns)
+                if title_el is None or not title_el.text:
+                    continue
+                title = title_el.text.strip()
+                desc = ""
+                if summary_el is not None and summary_el.text:
+                    desc = BeautifulSoup(
+                        summary_el.text, "html.parser"
+                    ).get_text(strip=True)[:200]
+                headlines.append({
+                    "source": source_name,
+                    "title": title,
+                    "description": desc,
+                })
+                count += 1
+
+        log.info(f"[Briefing] {source_name}: {count} titulares")
+
+    return headlines
+
+
+def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
+    """Envía los titulares a Gemini 2.5 Flash para generar un briefing categorizado."""
+    if not GEMINI_API_KEY:
+        log.error("Falta GEMINI_API_KEY para generar el briefing.")
+        return None
+
+    if not headlines:
+        log.info("[Briefing] Sin titulares, nada que resumir.")
+        return None
+
+    # Preparar los titulares como texto
+    headlines_text = ""
+    for h in headlines:
+        headlines_text += f"[{h['source']}] {h['title']}"
+        if h["description"]:
+            headlines_text += f" — {h['description']}"
+        headlines_text += "\n"
+
+    prompt = f"""Genera un briefing de noticias MUY CONCISO a partir de estos titulares.
+
+USA ESTOS BLOQUES (incluye SOLO los que tengan noticias relevantes):
+
+🌍 INTERNACIONAL
+• 2-3 noticias del mundo
+
+🏛 ESPAÑA
+• 2-3 noticias de política/sociedad nacional
+
+📍 MÁLAGA Y ANDALUCÍA
+• 1-2 noticias locales (busca en Málaga Hoy, Diario Sur)
+
+⚽ DEPORTE
+• Noticias de Real Madrid (fútbol y baloncesto), Málaga CF o Unicaja (busca en Marca, AS)
+• Si no hay de estos equipos, omite la sección
+
+🤖 TECNOLOGÍA
+• Novedades de IA, Apple o tecnología (busca en OpenAI Blog, 9to5Mac)
+
+REGLAS:
+- Cada noticia en UNA frase corta (máximo 15 palabras)
+- Todo en español
+- NO uses asteriscos, negritas ni markdown
+- NO añadas introducción, cierre ni línea de fuentes
+
+TITULARES:
+{headlines_text}"""
+
+    try:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash:generateContent"
+            f"?key={GEMINI_API_KEY}"
+        )
+        resp = requests.post(
+            url,
+            headers={"content-type": "application/json"},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 8192},
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        candidates = data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if parts and parts[0].get("text"):
+                return parts[0]["text"]
+        log.error(f"[Briefing] Respuesta inesperada de Gemini: {data}")
+        return None
+    except requests.RequestException as e:
+        log.error(f"[Briefing] Error al llamar a Gemini API: {e}")
+        return None
+
+
+def send_news_briefing() -> bool:
+    """Genera y envía el briefing de noticias por Telegram."""
+    log.info("[Briefing] Recopilando titulares...")
+    headlines = fetch_news_headlines()
+
+    if not headlines:
+        log.info("[Briefing] No se obtuvieron titulares.")
+        return False
+
+    log.info(f"[Briefing] {len(headlines)} titulares recopilados. Generando resumen...")
+    briefing = generate_news_briefing(headlines)
+
+    if not briefing:
+        return False
+
+    # Enviar como texto plano (sin MarkdownV2 para evitar problemas de escape)
+    now = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=2))  # CEST
+    )
+    date_str = now.strftime("%d/%m/%Y")
+
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}"
+
+    # Enviar (partiendo en trozos si supera el límite de Telegram)
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
+        return False
+
+    success = True
+    for chunk in _split_message(message, max_len=3000):
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": chunk,
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("ok"):
+                log.error(f"[Briefing] Error de Telegram: {data}")
+                success = False
+        except requests.RequestException as e:
+            log.error(f"[Briefing] Error al enviar: {e}")
+            success = False
+
+    if success:
+        log.info("[Briefing] Enviado correctamente.")
+    return success
+
+
+def _split_message(text: str, max_len: int = 4096) -> list[str]:
+    """Parte un mensaje largo en trozos respetando saltos de línea."""
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Buscar el último salto de línea doble dentro del límite
+        cut = text.rfind("\n\n", 0, max_len)
+        if cut == -1:
+            # Si no hay, buscar salto simple
+            cut = text.rfind("\n", 0, max_len)
+        if cut == -1:
+            # Último recurso: cortar en el límite
+            cut = max_len
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks
+
+
 def format_telegram_message(all_articles: list[dict]) -> str:
     """Formatea el mensaje de Telegram con Markdown."""
     now = datetime.now(timezone.utc).astimezone(
@@ -691,6 +927,12 @@ def run_digest(notify_empty: bool = False) -> None:
         notify_empty: si True, envía mensaje incluso cuando no hay artículos.
     """
     log.info("Iniciando Vigía — revisión de artículos...")
+
+    # ── Briefing de noticias (antes de las columnas) ─────────────────
+    if GEMINI_API_KEY:
+        send_news_briefing()
+    else:
+        log.info("Sin GEMINI_API_KEY — briefing omitido.")
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen = load_seen_articles()
@@ -914,6 +1156,19 @@ def _handle_command(text: str, chat_id: int) -> None:
                 _escape_md(f"❌ No pude obtener artículos de {author_name}.")
             )
 
+    elif cmd == "/briefing":
+        if not GEMINI_API_KEY:
+            send_telegram_message(
+                _escape_md("❌ No hay API key de Anthropic configurada.")
+            )
+            return
+        send_telegram_message("📰 _Generando briefing de noticias\\.\\.\\._")
+        success = send_news_briefing()
+        if not success:
+            send_telegram_message(
+                _escape_md("❌ No se pudo generar el briefing.")
+            )
+
     elif cmd == "/status":
         lines = ["🔎 *Vigía — Estado*", ""]
         lines.append(f"*El País* \\({_escape_md(str(len(ELPAIS_AUTHORS)))} autores\\)")
@@ -948,6 +1203,7 @@ def _handle_command(text: str, chat_id: int) -> None:
             "📋 *Comandos disponibles:*\n"
             "\n"
             "/update — Consultar artículos ahora\n"
+            "/briefing — Briefing de noticias con IA\n"
             "/random — Artículo aleatorio de un autor\n"
             "/status — Ver autores configurados\n"
             "/add — Añadir un autor\n"
@@ -955,6 +1211,7 @@ def _handle_command(text: str, chat_id: int) -> None:
             "/help — Este mensaje\n"
             "\n"
             "📝 *Ejemplos:*\n"
+            "`/briefing` — resumen de noticias del día\n"
             "`/random Jabois` — aleatorio de Jabois\n"
             "`/random` — autor y artículo al azar\n"
             "`/add elpais Elvira Lindo elvira\\-lindo`\n"
