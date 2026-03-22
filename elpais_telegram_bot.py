@@ -47,6 +47,8 @@ from bs4 import BeautifulSoup
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# API gratuita de deportes (100 req/día) — https://www.api-sports.io/
+API_SPORTS_KEY = os.environ.get("API_SPORTS_KEY", "")
 
 # ── Autores (cargados desde authors.json) ─────────────────────────
 # El archivo authors.json contiene tres secciones:
@@ -90,6 +92,35 @@ USER_AGENT = (
 # Archivo local para evitar enviar duplicados entre ejecuciones
 SEEN_FILE = Path(__file__).parent / ".elpais_seen_articles.json"
 AUTHORS_FILE = Path(__file__).parent / "authors.json"
+# Caché de IDs de equipos deportivos (se auto-rellena en el primer uso)
+SPORTS_ID_CACHE_FILE = Path(__file__).parent / ".sports_ids_cache.json"
+
+# ── Equipos a seguir ───────────────────────────────────────────────
+# Fútbol: IDs de api-football.com (v3.football.api-sports.io)
+FOLLOWED_FOOTBALL_TEAMS: dict[str, int] = {
+    "Real Madrid": 541,
+    "Málaga CF": 724,
+}
+# Baloncesto: nombres para búsqueda en api-basketball.com
+# (los IDs se resuelven automáticamente y se cachean en .sports_ids_cache.json)
+FOLLOWED_BASKETBALL_TEAMS: list[str] = [
+    "Real Madrid",
+    "Unicaja",
+]
+
+# Canal de TV típico por competición en España (derechos 2025-26)
+COMPETITION_TV_SPAIN: dict[str, str] = {
+    "La Liga": "DAZN / Movistar+ LaLiga",
+    "Segunda División": "DAZN",
+    "Copa del Rey": "DAZN / Movistar+",
+    "Supercopa de España": "DAZN",
+    "UEFA Champions League": "Movistar+ Champions",
+    "UEFA Europa League": "DAZN",
+    "UEFA Conference League": "DAZN",
+    "Liga ACB": "Movistar+ Deportes",
+    "EuroLeague": "DAZN",
+    "EuroCup": "DAZN",
+}
 
 # Logging
 logging.basicConfig(
@@ -631,6 +662,7 @@ def fetch_random_elpais_article(slug: str) -> Optional[dict]:
 def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
     """Recoge titulares recientes de todas las fuentes de noticias."""
     headlines: list[dict] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
     for source_name, feed_url in NEWS_SOURCES.items():
         xml_text, err = _fetch_page(feed_url)
@@ -653,6 +685,15 @@ def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
             desc_el = item.find("description")
             if title_el is None or not title_el.text:
                 continue
+            # Filtrar por fecha: descartar artículos de más de 24h
+            pubdate_el = item.find("pubDate")
+            if pubdate_el is not None and pubdate_el.text:
+                try:
+                    pub_dt = parsedate_to_datetime(pubdate_el.text)
+                    if pub_dt < cutoff:
+                        continue
+                except Exception:
+                    pass
             title = title_el.text.strip()
             desc = ""
             if desc_el is not None and desc_el.text:
@@ -675,6 +716,17 @@ def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
                 summary_el = entry.find("atom:summary", ns)
                 if title_el is None or not title_el.text:
                     continue
+                # Filtrar por fecha en feeds Atom
+                updated_el = entry.find("atom:updated", ns)
+                if updated_el is not None and updated_el.text:
+                    try:
+                        pub_dt = datetime.fromisoformat(
+                            updated_el.text.replace("Z", "+00:00")
+                        )
+                        if pub_dt < cutoff:
+                            continue
+                    except Exception:
+                        pass
                 title = title_el.text.strip()
                 desc = ""
                 if summary_el is not None and summary_el.text:
@@ -691,6 +743,142 @@ def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
         log.info(f"[Briefing] {source_name}: {count} titulares")
 
     return headlines
+
+
+# ── Fixtures deportivos ────────────────────────────────────────────
+
+
+def _load_sports_id_cache() -> dict:
+    if SPORTS_ID_CACHE_FILE.exists():
+        try:
+            return json.loads(SPORTS_ID_CACHE_FILE.read_text())
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return {}
+
+
+def _save_sports_id_cache(cache: dict) -> None:
+    SPORTS_ID_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
+
+
+def _get_basketball_team_id(team_name: str) -> Optional[int]:
+    """Resuelve el ID de un equipo de baloncesto en api-sports.io (con caché local)."""
+    cache = _load_sports_id_cache()
+    cache_key = f"basketball:{team_name}"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    try:
+        resp = requests.get(
+            "https://v3.basketball.api-sports.io/teams",
+            headers={"x-apisports-key": API_SPORTS_KEY},
+            params={"name": team_name, "country": "Spain"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("response", [])
+        if results:
+            team_id = results[0]["id"]
+            cache[cache_key] = team_id
+            _save_sports_id_cache(cache)
+            return team_id
+    except requests.RequestException as e:
+        log.warning(f"[Fixtures] No se pudo resolver ID baloncesto de {team_name}: {e}")
+    return None
+
+
+def fetch_upcoming_fixtures() -> list[str]:
+    """
+    Devuelve líneas con partidos de hoy o mañana para los equipos seguidos.
+    Requiere API_SPORTS_KEY de https://www.api-sports.io/ (plan gratuito: 100 req/día).
+    """
+    if not API_SPORTS_KEY:
+        return []
+
+    tz_madrid = timezone(timedelta(hours=2))  # CEST; en invierno usar hours=1
+    now = datetime.now(tz_madrid)
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    target_dates = {today, tomorrow}
+
+    lines: list[str] = []
+
+    # ── Fútbol ──────────────────────────────────────────────────────
+    for team_name, team_id in FOLLOWED_FOOTBALL_TEAMS.items():
+        try:
+            resp = requests.get(
+                "https://v3.football.api-sports.io/fixtures",
+                headers={"x-apisports-key": API_SPORTS_KEY},
+                params={"team": team_id, "next": 5},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            fixtures = resp.json().get("response", [])
+        except requests.RequestException as e:
+            log.warning(f"[Fixtures] Error fútbol {team_name}: {e}")
+            continue
+
+        for fix in fixtures:
+            try:
+                date_str = fix["fixture"]["date"]  # ISO 8601 con tz
+                match_dt = datetime.fromisoformat(date_str).astimezone(tz_madrid)
+                if match_dt.date() not in target_dates:
+                    continue
+                home = fix["teams"]["home"]["name"]
+                away = fix["teams"]["away"]["name"]
+                league = fix["league"]["name"]
+                time_str = match_dt.strftime("%H:%M")
+                when = "hoy" if match_dt.date() == today else "mañana"
+                channel = COMPETITION_TV_SPAIN.get(league, "")
+                channel_str = f" — {channel}" if channel else ""
+                lines.append(
+                    f"⚽ {home} vs {away} ({league}) — {when} {time_str}{channel_str}"
+                )
+            except (KeyError, ValueError):
+                continue
+
+    # ── Baloncesto ──────────────────────────────────────────────────
+    for team_name in FOLLOWED_BASKETBALL_TEAMS:
+        team_id = _get_basketball_team_id(team_name)
+        if not team_id:
+            continue
+        try:
+            resp = requests.get(
+                "https://v3.basketball.api-sports.io/games",
+                headers={"x-apisports-key": API_SPORTS_KEY},
+                params={"team": team_id, "next": 5},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            games = resp.json().get("response", [])
+        except requests.RequestException as e:
+            log.warning(f"[Fixtures] Error baloncesto {team_name}: {e}")
+            continue
+
+        for game in games:
+            try:
+                date_str = game.get("date", "")
+                if not date_str:
+                    continue
+                match_dt = datetime.fromisoformat(
+                    date_str.replace("Z", "+00:00")
+                ).astimezone(tz_madrid)
+                if match_dt.date() not in target_dates:
+                    continue
+                home = game["teams"]["home"]["name"]
+                away = game["teams"]["away"]["name"]
+                league = game["league"]["name"]
+                time_str = match_dt.strftime("%H:%M")
+                when = "hoy" if match_dt.date() == today else "mañana"
+                channel = COMPETITION_TV_SPAIN.get(league, "")
+                channel_str = f" — {channel}" if channel else ""
+                lines.append(
+                    f"🏀 {home} vs {away} ({league}) — {when} {time_str}{channel_str}"
+                )
+            except (KeyError, ValueError):
+                continue
+
+    return lines
 
 
 def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
@@ -788,7 +976,13 @@ def send_news_briefing() -> bool:
     )
     date_str = now.strftime("%d/%m/%Y")
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}"
+    # Añadir bloque de fixtures si hay partidos hoy o mañana
+    fixtures = fetch_upcoming_fixtures()
+    fixtures_block = ""
+    if fixtures:
+        fixtures_block = "\n\n📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures)
+
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{fixtures_block}"
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
