@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 # Forzar API_SPORTS_KEY para que fetch_upcoming_fixtures() no salga antes de tiempo
 os.environ.setdefault("API_SPORTS_KEY", "test_key_fake")
 
-import elpais_telegram_bot as bot
+import blitzbrief as bot
 
 
 TZ_MADRID = timezone(timedelta(hours=2))
@@ -60,8 +60,8 @@ def _mock_basketball_response(games: list[dict]) -> MagicMock:
 
 class TestFetchUpcomingFixtures(unittest.TestCase):
 
-    @patch("elpais_telegram_bot.requests.get")
-    @patch("elpais_telegram_bot._get_basketball_team_id", return_value=123)
+    @patch("blitzbrief.requests.get")
+    @patch("blitzbrief._get_basketball_team_id", return_value=123)
     def test_football_match_today(self, mock_bball_id, mock_get):
         """Un partido de fútbol hoy debe aparecer con 'hoy' y el canal correcto."""
         now = datetime.now(TZ_MADRID)
@@ -92,8 +92,8 @@ class TestFetchUpcomingFixtures(unittest.TestCase):
         self.assertIn("21:00", lines[0])
         self.assertIn("DAZN / Movistar+ LaLiga", lines[0])
 
-    @patch("elpais_telegram_bot.requests.get")
-    @patch("elpais_telegram_bot._get_basketball_team_id", return_value=456)
+    @patch("blitzbrief.requests.get")
+    @patch("blitzbrief._get_basketball_team_id", return_value=456)
     def test_basketball_match_tomorrow(self, mock_bball_id, mock_get):
         """Un partido de baloncesto mañana debe aparecer con 'mañana'."""
         now = datetime.now(TZ_MADRID)
@@ -122,8 +122,8 @@ class TestFetchUpcomingFixtures(unittest.TestCase):
         self.assertIn("19:30", lines[0])
         self.assertIn("Movistar+ Deportes", lines[0])
 
-    @patch("elpais_telegram_bot.requests.get")
-    @patch("elpais_telegram_bot._get_basketball_team_id", return_value=123)
+    @patch("blitzbrief.requests.get")
+    @patch("blitzbrief._get_basketball_team_id", return_value=123)
     def test_match_in_3_days_not_shown(self, mock_bball_id, mock_get):
         """Un partido dentro de 3 días NO debe aparecer."""
         now = datetime.now(TZ_MADRID)
@@ -145,8 +145,8 @@ class TestFetchUpcomingFixtures(unittest.TestCase):
         lines = bot.fetch_upcoming_fixtures()
         self.assertEqual(len(lines), 0)
 
-    @patch("elpais_telegram_bot.requests.get")
-    @patch("elpais_telegram_bot._get_basketball_team_id", return_value=789)
+    @patch("blitzbrief.requests.get")
+    @patch("blitzbrief._get_basketball_team_id", return_value=789)
     def test_multiple_matches(self, mock_bball_id, mock_get):
         """Varios partidos de distintos deportes deben aparecer todos."""
         now = datetime.now(TZ_MADRID)
@@ -178,8 +178,8 @@ class TestFetchUpcomingFixtures(unittest.TestCase):
         self.assertIn("⚽", lines[0])
         self.assertIn("🏀", lines[1])
 
-    @patch("elpais_telegram_bot.requests.get")
-    @patch("elpais_telegram_bot._get_basketball_team_id", return_value=123)
+    @patch("blitzbrief.requests.get")
+    @patch("blitzbrief._get_basketball_team_id", return_value=123)
     def test_unknown_league_no_channel(self, mock_bball_id, mock_get):
         """Liga desconocida no debe mostrar canal de TV."""
         now = datetime.now(TZ_MADRID)
@@ -206,8 +206,8 @@ class TestFetchUpcomingFixtures(unittest.TestCase):
         # Debe terminar en la hora, sin " — canal"
         self.assertTrue(lines[0].endswith("21:00"))
 
-    @patch("elpais_telegram_bot.requests.get")
-    @patch("elpais_telegram_bot._get_basketball_team_id", return_value=123)
+    @patch("blitzbrief.requests.get")
+    @patch("blitzbrief._get_basketball_team_id", return_value=123)
     def test_no_api_key_returns_empty(self, mock_bball_id, mock_get):
         """Sin API_SPORTS_KEY, debe retornar lista vacía."""
         original = bot.API_SPORTS_KEY

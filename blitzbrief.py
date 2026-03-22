@@ -20,7 +20,7 @@ Uso local:
   pip install requests beautifulsoup4
   export TELEGRAM_BOT_TOKEN="tu_token"
   export TELEGRAM_CHAT_ID="tu_chat_id"
-  python elpais_telegram_bot.py
+  python blitzbrief.py
 """
 
 import os

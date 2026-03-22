@@ -81,16 +81,16 @@ export TELEGRAM_CHAT_ID="tu_chat_id"
 export GEMINI_API_KEY="tu_api_key"
 
 # Digest una vez (briefing + columnas)
-python elpais_telegram_bot.py
+python blitzbrief.py
 
 # Modo bot interactivo (escucha comandos)
-python elpais_telegram_bot.py --serve
+python blitzbrief.py --serve
 ```
 
 ## Arquitectura
 
 ```
-elpais_telegram_bot.py   # Script principal (briefing IA + scraping + bot)
+blitzbrief.py            # Script principal (briefing IA + scraping + bot)
 authors.json             # Autores configurados (editable desde Telegram)
 .github/workflows/       # GitHub Actions para ejecución automática
 ```
