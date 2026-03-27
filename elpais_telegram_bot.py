@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -795,7 +796,7 @@ def fetch_upcoming_fixtures() -> list[str]:
     if not API_SPORTS_KEY:
         return []
 
-    tz_madrid = timezone(timedelta(hours=2))  # CEST; en invierno usar hours=1
+    tz_madrid = ZoneInfo("Europe/Madrid")
     now = datetime.now(tz_madrid)
     today = now.date()
     tomorrow = today + timedelta(days=1)
@@ -881,6 +882,63 @@ def fetch_upcoming_fixtures() -> list[str]:
     return lines
 
 
+# ── Bitcoin ─────────────────────────────────────────────────────────
+
+
+def fetch_bitcoin_block() -> str:
+    """
+    Devuelve un bloque con el precio de Bitcoin en EUR y variación 24h.
+    Si la variación es importante (>=5%), busca una noticia que lo explique.
+    Usa CoinGecko API (gratis, sin API key).
+    """
+    # ── Precio BTC/EUR ──────────────────────────────────────────────
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids": "bitcoin",
+                "vs_currencies": "eur",
+                "include_24hr_change": "true",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("bitcoin", {})
+    except requests.RequestException as e:
+        log.warning(f"[Bitcoin] Error al obtener precio: {e}")
+        return ""
+
+    price = data.get("eur")
+    change = data.get("eur_24h_change")
+    if price is None:
+        return ""
+
+    price_str = f"{price:,.0f}".replace(",", ".")
+    arrow = "📈" if (change or 0) >= 0 else "📉"
+    change_str = f" ({change:+.1f}%)" if change is not None else ""
+    line = f"{arrow} Bitcoin: {price_str} €{change_str}"
+
+    # ── Si variación >= 5%, buscar noticia explicativa (CoinDesk) ──
+    if change is not None and abs(change) >= 5:
+        try:
+            rss_resp = requests.get(
+                "https://www.coindesk.com/arc/outboundfeeds/rss/",
+                headers={"User-Agent": USER_AGENT},
+                timeout=10,
+            )
+            if rss_resp.ok:
+                root = ET.fromstring(rss_resp.text)
+                items = root.findall(".//item")
+                if items:
+                    first_title = items[0].find("title")
+                    if first_title is not None and first_title.text:
+                        line += f"\n   └ {first_title.text.strip()}"
+        except (requests.RequestException, ET.ParseError) as e:
+            log.warning(f"[Bitcoin] Error al obtener noticias crypto: {e}")
+
+    return line
+
+
 def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
     """Envía los titulares a Gemini 2.5 Flash para generar un briefing categorizado."""
     if not GEMINI_API_KEY:
@@ -899,7 +957,7 @@ def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
             headlines_text += f" — {h['description']}"
         headlines_text += "\n"
 
-    today = datetime.now(timezone(timedelta(hours=2))).strftime("%d/%m/%Y")
+    today = datetime.now(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y")
 
     prompt = f"""Hoy es {today}. Eres el editor de un briefing matutino ultra-breve.
 Tu trabajo es SELECCIONAR la noticia más importante de cada categoría, no comprimir todas.
@@ -971,10 +1029,12 @@ def send_news_briefing() -> bool:
         return False
 
     # Enviar como texto plano (sin MarkdownV2 para evitar problemas de escape)
-    now = datetime.now(timezone.utc).astimezone(
-        timezone(timedelta(hours=2))  # CEST
-    )
+    now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
+
+    # Añadir bloque de Bitcoin
+    bitcoin_block = fetch_bitcoin_block()
+    bitcoin_section = f"\n\n{bitcoin_block}" if bitcoin_block else ""
 
     # Añadir bloque de fixtures si hay partidos hoy o mañana
     fixtures = fetch_upcoming_fixtures()
@@ -982,7 +1042,7 @@ def send_news_briefing() -> bool:
     if fixtures:
         fixtures_block = "\n\n📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures)
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{fixtures_block}"
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{bitcoin_section}{fixtures_block}"
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
