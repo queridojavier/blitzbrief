@@ -882,6 +882,82 @@ def fetch_upcoming_fixtures() -> list[str]:
     return lines
 
 
+# ── Meteorología ────────────────────────────────────────────────────
+
+# Códigos WMO → descripción corta y emoji
+_WMO_DESCRIPTIONS: dict[int, tuple[str, str]] = {
+    0: ("despejado", "☀️"),
+    1: ("mayormente despejado", "🌤"),
+    2: ("parcialmente nublado", "⛅"),
+    3: ("nublado", "☁️"),
+    45: ("niebla", "🌫"),
+    48: ("niebla con escarcha", "🌫"),
+    51: ("llovizna ligera", "🌦"),
+    53: ("llovizna", "🌦"),
+    55: ("llovizna intensa", "🌧"),
+    61: ("lluvia ligera", "🌧"),
+    63: ("lluvia", "🌧"),
+    65: ("lluvia intensa", "🌧"),
+    71: ("nieve ligera", "🌨"),
+    73: ("nieve", "🌨"),
+    75: ("nieve intensa", "🌨"),
+    80: ("chubascos ligeros", "🌦"),
+    81: ("chubascos", "🌧"),
+    82: ("chubascos fuertes", "🌧"),
+    95: ("tormenta", "⛈"),
+    96: ("tormenta con granizo", "⛈"),
+    99: ("tormenta con granizo fuerte", "⛈"),
+}
+
+
+def fetch_weather_block() -> str:
+    """
+    Devuelve una línea con el tiempo actual y previsión del día en Málaga.
+    Usa Open-Meteo (gratis, sin API key).
+    """
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": 36.7213,
+                "longitude": -4.4214,
+                "current": "temperature_2m,weather_code",
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                "timezone": "Europe/Madrid",
+                "forecast_days": 1,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        log.warning(f"[Meteo] Error al obtener el tiempo: {e}")
+        return ""
+
+    current = data.get("current", {})
+    daily = data.get("daily", {})
+
+    temp = current.get("temperature_2m")
+    code = current.get("weather_code", 0)
+    t_max_list = daily.get("temperature_2m_max", [])
+    t_min_list = daily.get("temperature_2m_min", [])
+    rain_list = daily.get("precipitation_probability_max", [])
+
+    if temp is None:
+        return ""
+
+    desc, emoji = _WMO_DESCRIPTIONS.get(code, ("", "🌡"))
+    parts = [f"{emoji} Málaga: {temp:.0f}°C, {desc}"]
+
+    if t_min_list and t_max_list:
+        parts.append(f"(mín {t_min_list[0]:.0f}° / máx {t_max_list[0]:.0f}°)")
+
+    if rain_list and rain_list[0] > 20:
+        parts.append(f"— 🌂 {rain_list[0]:.0f}% prob. lluvia")
+
+    return " ".join(parts)
+
+
 # ── Bitcoin ─────────────────────────────────────────────────────────
 
 
@@ -1032,9 +1108,13 @@ def send_news_briefing() -> bool:
     now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
 
+    # Añadir bloque de tiempo
+    weather = fetch_weather_block()
+    weather_section = f"\n\n{weather}" if weather else ""
+
     # Añadir bloque de Bitcoin
     bitcoin_block = fetch_bitcoin_block()
-    bitcoin_section = f"\n\n{bitcoin_block}" if bitcoin_block else ""
+    bitcoin_section = f"\n{bitcoin_block}" if bitcoin_block else ""
 
     # Añadir bloque de fixtures si hay partidos hoy o mañana
     fixtures = fetch_upcoming_fixtures()
@@ -1042,7 +1122,7 @@ def send_news_briefing() -> bool:
     if fixtures:
         fixtures_block = "\n\n📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures)
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{bitcoin_section}{fixtures_block}"
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}{bitcoin_section}{fixtures_block}"
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
