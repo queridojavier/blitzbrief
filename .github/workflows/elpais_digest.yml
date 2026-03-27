@@ -1,18 +1,34 @@
 # .github/workflows/elpais_digest.yml
 #
-# Ejecuta el bot cada mañana (hora de España peninsular).
-# GitHub Actions usa UTC: 7:00 UTC = 9:00 CEST (verano) / 8:00 CET (invierno).
-# Un solo cron para evitar notificaciones duplicadas.
+# Ejecuta el bot dos veces al día (hora de España peninsular):
+#   - Mañana: briefing de noticias + tiempo + artículos de columnistas
+#   - Tarde:  deporte + Bitcoin + podcast de Jabois
+#
+# GitHub Actions usa UTC:
+#   7:00 UTC = 9:00 CEST (verano) / 8:00 CET (invierno)
+#  19:00 UTC = 21:00 CEST (verano) / 20:00 CET (invierno)
 
 name: BlitzBrief Daily Digest
 
 on:
   schedule:
-    # 7:00 UTC → 9:00 en verano, 8:00 en invierno
+    # Mañana: 7:00 UTC → 9:00 verano / 8:00 invierno
     - cron: "0 7 * * *"
+    # Tarde: 19:00 UTC → 21:00 verano / 20:00 invierno
+    - cron: "0 19 * * *"
 
   # Permite ejecución manual desde la pestaña Actions de GitHub
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de ejecución"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full
+          - morning
+          - evening
 
 jobs:
   send-digest:
@@ -30,10 +46,21 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4
 
+      - name: Determine run mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "flag=--${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 7 * * *" ]; then
+            echo "flag=--morning" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=--evening" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run digest bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           API_SPORTS_KEY: ${{ secrets.API_SPORTS_KEY }}
-        run: python elpais_telegram_bot.py
+        run: python elpais_telegram_bot.py ${{ steps.mode.outputs.flag }}

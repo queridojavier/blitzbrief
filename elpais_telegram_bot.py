@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -795,7 +796,7 @@ def fetch_upcoming_fixtures() -> list[str]:
     if not API_SPORTS_KEY:
         return []
 
-    tz_madrid = timezone(timedelta(hours=2))  # CEST; en invierno usar hours=1
+    tz_madrid = ZoneInfo("Europe/Madrid")
     now = datetime.now(tz_madrid)
     today = now.date()
     tomorrow = today + timedelta(days=1)
@@ -881,6 +882,139 @@ def fetch_upcoming_fixtures() -> list[str]:
     return lines
 
 
+# ── Meteorología ────────────────────────────────────────────────────
+
+# Códigos WMO → descripción corta y emoji
+_WMO_DESCRIPTIONS: dict[int, tuple[str, str]] = {
+    0: ("despejado", "☀️"),
+    1: ("mayormente despejado", "🌤"),
+    2: ("parcialmente nublado", "⛅"),
+    3: ("nublado", "☁️"),
+    45: ("niebla", "🌫"),
+    48: ("niebla con escarcha", "🌫"),
+    51: ("llovizna ligera", "🌦"),
+    53: ("llovizna", "🌦"),
+    55: ("llovizna intensa", "🌧"),
+    61: ("lluvia ligera", "🌧"),
+    63: ("lluvia", "🌧"),
+    65: ("lluvia intensa", "🌧"),
+    71: ("nieve ligera", "🌨"),
+    73: ("nieve", "🌨"),
+    75: ("nieve intensa", "🌨"),
+    80: ("chubascos ligeros", "🌦"),
+    81: ("chubascos", "🌧"),
+    82: ("chubascos fuertes", "🌧"),
+    95: ("tormenta", "⛈"),
+    96: ("tormenta con granizo", "⛈"),
+    99: ("tormenta con granizo fuerte", "⛈"),
+}
+
+
+def fetch_weather_block() -> str:
+    """
+    Devuelve una línea con el tiempo actual y previsión del día en Málaga.
+    Usa Open-Meteo (gratis, sin API key).
+    """
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": 36.7213,
+                "longitude": -4.4214,
+                "current": "temperature_2m,weather_code",
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                "timezone": "Europe/Madrid",
+                "forecast_days": 1,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        log.warning(f"[Meteo] Error al obtener el tiempo: {e}")
+        return ""
+
+    current = data.get("current", {})
+    daily = data.get("daily", {})
+
+    temp = current.get("temperature_2m")
+    code = current.get("weather_code", 0)
+    t_max_list = daily.get("temperature_2m_max", [])
+    t_min_list = daily.get("temperature_2m_min", [])
+    rain_list = daily.get("precipitation_probability_max", [])
+
+    if temp is None:
+        return ""
+
+    desc, emoji = _WMO_DESCRIPTIONS.get(code, ("", "🌡"))
+    parts = [f"{emoji} Málaga: {temp:.0f}°C, {desc}"]
+
+    if t_min_list and t_max_list:
+        parts.append(f"(mín {t_min_list[0]:.0f}° / máx {t_max_list[0]:.0f}°)")
+
+    if rain_list and rain_list[0] > 20:
+        parts.append(f"— 🌂 {rain_list[0]:.0f}% prob. lluvia")
+
+    return " ".join(parts)
+
+
+# ── Bitcoin ─────────────────────────────────────────────────────────
+
+
+def fetch_bitcoin_block() -> str:
+    """
+    Devuelve un bloque con el precio de Bitcoin en EUR y variación 24h.
+    Si la variación es importante (>=5%), busca una noticia que lo explique.
+    Usa CoinGecko API (gratis, sin API key).
+    """
+    # ── Precio BTC/EUR ──────────────────────────────────────────────
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids": "bitcoin",
+                "vs_currencies": "eur",
+                "include_24hr_change": "true",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("bitcoin", {})
+    except requests.RequestException as e:
+        log.warning(f"[Bitcoin] Error al obtener precio: {e}")
+        return ""
+
+    price = data.get("eur")
+    change = data.get("eur_24h_change")
+    if price is None:
+        return ""
+
+    price_str = f"{price:,.0f}".replace(",", ".")
+    arrow = "📈" if (change or 0) >= 0 else "📉"
+    change_str = f" ({change:+.1f}%)" if change is not None else ""
+    line = f"{arrow} Bitcoin: {price_str} €{change_str}"
+
+    # ── Si variación >= 5%, buscar noticia explicativa (CoinDesk) ──
+    if change is not None and abs(change) >= 5:
+        try:
+            rss_resp = requests.get(
+                "https://www.coindesk.com/arc/outboundfeeds/rss/",
+                headers={"User-Agent": USER_AGENT},
+                timeout=10,
+            )
+            if rss_resp.ok:
+                root = ET.fromstring(rss_resp.text)
+                items = root.findall(".//item")
+                if items:
+                    first_title = items[0].find("title")
+                    if first_title is not None and first_title.text:
+                        line += f"\n   └ {first_title.text.strip()}"
+        except (requests.RequestException, ET.ParseError) as e:
+            log.warning(f"[Bitcoin] Error al obtener noticias crypto: {e}")
+
+    return line
+
+
 def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
     """Envía los titulares a Gemini 2.5 Flash para generar un briefing categorizado."""
     if not GEMINI_API_KEY:
@@ -899,7 +1033,7 @@ def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
             headlines_text += f" — {h['description']}"
         headlines_text += "\n"
 
-    today = datetime.now(timezone(timedelta(hours=2))).strftime("%d/%m/%Y")
+    today = datetime.now(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y")
 
     prompt = f"""Hoy es {today}. Eres el editor de un briefing matutino ultra-breve.
 Tu trabajo es SELECCIONAR la noticia más importante de cada categoría, no comprimir todas.
@@ -956,7 +1090,7 @@ TITULARES:
 
 
 def send_news_briefing() -> bool:
-    """Genera y envía el briefing de noticias por Telegram."""
+    """Genera y envía el briefing matutino: noticias + tiempo."""
     log.info("[Briefing] Recopilando titulares...")
     headlines = fetch_news_headlines()
 
@@ -971,18 +1105,14 @@ def send_news_briefing() -> bool:
         return False
 
     # Enviar como texto plano (sin MarkdownV2 para evitar problemas de escape)
-    now = datetime.now(timezone.utc).astimezone(
-        timezone(timedelta(hours=2))  # CEST
-    )
+    now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
 
-    # Añadir bloque de fixtures si hay partidos hoy o mañana
-    fixtures = fetch_upcoming_fixtures()
-    fixtures_block = ""
-    if fixtures:
-        fixtures_block = "\n\n📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures)
+    # Añadir bloque de tiempo
+    weather = fetch_weather_block()
+    weather_section = f"\n\n{weather}" if weather else ""
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{fixtures_block}"
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}"
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -1009,6 +1139,53 @@ def send_news_briefing() -> bool:
 
     if success:
         log.info("[Briefing] Enviado correctamente.")
+    return success
+
+
+def send_evening_briefing() -> bool:
+    """Genera y envía el briefing de tarde: Bitcoin + deporte."""
+    now = datetime.now(ZoneInfo("Europe/Madrid"))
+    date_str = now.strftime("%d/%m/%Y")
+
+    blocks: list[str] = []
+
+    # ── Bitcoin ──────────────────────────────────────────────────────
+    bitcoin = fetch_bitcoin_block()
+    if bitcoin:
+        blocks.append(bitcoin)
+
+    # ── Fixtures deportivos ──────────────────────────────────────────
+    fixtures = fetch_upcoming_fixtures()
+    if fixtures:
+        blocks.append("📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures))
+
+    if not blocks:
+        log.info("[Evening] Sin datos de Bitcoin ni fixtures.")
+        return False
+
+    message = f"🌙 BRIEFING DE TARDE — {date_str}\n\n" + "\n\n".join(blocks)
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
+        return False
+
+    success = True
+    for chunk in _split_message(message, max_len=3000):
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk}
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("ok"):
+                log.error(f"[Evening] Error de Telegram: {data}")
+                success = False
+        except requests.RequestException as e:
+            log.error(f"[Evening] Error al enviar: {e}")
+            success = False
+
+    if success:
+        log.info("[Evening] Enviado correctamente.")
     return success
 
 
@@ -1113,77 +1290,84 @@ def send_telegram_message(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def run_digest(notify_empty: bool = False) -> None:
-    """Ejecuta el ciclo completo: scraping → formateo → envío por Telegram.
+def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
+    """Ejecuta el ciclo de envío por Telegram.
 
     Args:
         notify_empty: si True, envía mensaje incluso cuando no hay artículos.
+        mode: "morning" (briefing + columnas), "evening" (deporte + bitcoin + podcast),
+              o "full" (todo junto, comportamiento clásico).
     """
-    log.info("Iniciando BlitzBrief — revisión de artículos...")
+    log.info(f"Iniciando BlitzBrief — modo {mode}...")
 
-    # ── Briefing de noticias (antes de las columnas) ─────────────────
-    if GEMINI_API_KEY:
-        send_news_briefing()
-    else:
-        log.info("Sin GEMINI_API_KEY — briefing omitido.")
+    # ── Briefing matutino de noticias ─────────────────────────────────
+    if mode in ("morning", "full"):
+        if GEMINI_API_KEY:
+            send_news_briefing()
+        else:
+            log.info("Sin GEMINI_API_KEY — briefing omitido.")
+
+    # ── Briefing de tarde (deporte + bitcoin) ─────────────────────────
+    if mode in ("evening", "full"):
+        send_evening_briefing()
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen = load_seen_articles()
     all_new_articles: list[dict] = []
+    podcast_segments: list[dict] = []
     fetch_errors: list[str] = []
 
-    # ── El País ───────────────────────────────────────────────────
-    for author_name, slug in ELPAIS_AUTHORS.items():
-        log.info(f"[El País] Consultando: {author_name} ({slug})")
-        articles = fetch_elpais_articles(author_name, slug, cutoff, fetch_errors)
-        for art in articles:
-            h = article_hash(art["url"])
-            if h not in seen:
-                all_new_articles.append(art)
-                seen.add(h)
-        log.info(f"  → {len(articles)} artículo(s) reciente(s)")
+    # ── Artículos de columnistas (mañana o full) ─────────────────────
+    if mode in ("morning", "full"):
+        for author_name, slug in ELPAIS_AUTHORS.items():
+            log.info(f"[El País] Consultando: {author_name} ({slug})")
+            articles = fetch_elpais_articles(author_name, slug, cutoff, fetch_errors)
+            for art in articles:
+                h = article_hash(art["url"])
+                if h not in seen:
+                    all_new_articles.append(art)
+                    seen.add(h)
+            log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
-    # ── El Plural ─────────────────────────────────────────────────
-    for author_name, slug in ELPLURAL_AUTHORS.items():
-        log.info(f"[El Plural] Consultando: {author_name} ({slug})")
-        articles = fetch_elplural_articles(author_name, slug, cutoff, fetch_errors)
-        for art in articles:
-            h = article_hash(art["url"])
-            if h not in seen:
-                all_new_articles.append(art)
-                seen.add(h)
-        log.info(f"  → {len(articles)} artículo(s) reciente(s)")
+        for author_name, slug in ELPLURAL_AUTHORS.items():
+            log.info(f"[El Plural] Consultando: {author_name} ({slug})")
+            articles = fetch_elplural_articles(author_name, slug, cutoff, fetch_errors)
+            for art in articles:
+                h = article_hash(art["url"])
+                if h not in seen:
+                    all_new_articles.append(art)
+                    seen.add(h)
+            log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
-    # ── RSS (blogs) ───────────────────────────────────────────────
-    for author_name, feed_url in RSS_AUTHORS.items():
-        log.info(f"[RSS] Consultando: {author_name}")
-        articles = fetch_rss_articles(author_name, feed_url, cutoff, fetch_errors)
-        for art in articles:
-            h = article_hash(art["url"])
-            if h not in seen:
-                all_new_articles.append(art)
-                seen.add(h)
-        log.info(f"  → {len(articles)} artículo(s) reciente(s)")
+        for author_name, feed_url in RSS_AUTHORS.items():
+            log.info(f"[RSS] Consultando: {author_name}")
+            articles = fetch_rss_articles(author_name, feed_url, cutoff, fetch_errors)
+            for art in articles:
+                h = article_hash(art["url"])
+                if h not in seen:
+                    all_new_articles.append(art)
+                    seen.add(h)
+            log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
-    # ── Podcasts (audio directo) ────────────────────────────────────
-    podcast_segments: list[dict] = []
-    for label, config in PODCAST_SOURCES.items():
-        feed_url = config.get("feed", "")
-        title_filter = config.get("filter", "")
-        if not feed_url:
-            continue
-        log.info(f"[Podcast] Consultando: {label} (filtro: '{title_filter}')")
-        segments = fetch_podcast_segments(
-            label, feed_url, title_filter, cutoff, fetch_errors
-        )
-        for seg in segments:
-            h = article_hash(seg["audio_url"])
-            if h not in seen:
-                podcast_segments.append(seg)
-                seen.add(h)
-        log.info(f"  → {len(segments)} segmento(s) encontrado(s)")
+    # ── Podcasts (tarde o full) ──────────────────────────────────────
+    if mode in ("evening", "full"):
+        for label, config in PODCAST_SOURCES.items():
+            feed_url = config.get("feed", "")
+            title_filter = config.get("filter", "")
+            if not feed_url:
+                continue
+            log.info(f"[Podcast] Consultando: {label} (filtro: '{title_filter}')")
+            segments = fetch_podcast_segments(
+                label, feed_url, title_filter, cutoff, fetch_errors
+            )
+            for seg in segments:
+                h = article_hash(seg["audio_url"])
+                if h not in seen:
+                    podcast_segments.append(seg)
+                    seen.add(h)
+            log.info(f"  → {len(segments)} segmento(s) encontrado(s)")
 
-    # Ordenar por fecha (más reciente primero)
+    # ── Enviar artículos ─────────────────────────────────────────────
     all_new_articles.sort(
         key=lambda a: a.get("date") or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
@@ -1203,7 +1387,7 @@ def run_digest(notify_empty: bool = False) -> None:
             message = format_telegram_message([])
             send_telegram_message(message)
 
-    # ── Enviar audios de podcast ────────────────────────────────────
+    # ── Enviar audios de podcast ─────────────────────────────────────
     for seg in podcast_segments:
         if seg["audio_url"]:
             send_telegram_audio(
@@ -1212,7 +1396,7 @@ def run_digest(notify_empty: bool = False) -> None:
 
     save_seen_articles(seen)
 
-    # ── Alertas de errores ────────────────────────────────────────
+    # ── Alertas de errores ───────────────────────────────────────────
     if fetch_errors:
         error_lines = [
             "⚠️ *BlitzBrief — Errores al consultar fuentes*",
@@ -1462,8 +1646,12 @@ def main():
     load_authors()
     if "--serve" in sys.argv:
         serve()
+    elif "--evening" in sys.argv:
+        run_digest(mode="evening")
+    elif "--morning" in sys.argv:
+        run_digest(mode="morning")
     else:
-        run_digest()
+        run_digest(mode="full")
 
 
 if __name__ == "__main__":
