@@ -958,6 +958,56 @@ def fetch_weather_block() -> str:
     return " ".join(parts)
 
 
+def fetch_tomorrow_weather_block() -> str:
+    """
+    Devuelve una línea con la previsión de mañana en Málaga.
+    Solo destaca lo relevante: lluvia o calor extremo.
+    Usa Open-Meteo (gratis, sin API key).
+    """
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": 36.7213,
+                "longitude": -4.4214,
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
+                "timezone": "Europe/Madrid",
+                "forecast_days": 2,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        log.warning(f"[Meteo] Error al obtener previsión de mañana: {e}")
+        return ""
+
+    daily = data.get("daily", {})
+    t_max_list = daily.get("temperature_2m_max", [])
+    t_min_list = daily.get("temperature_2m_min", [])
+    rain_list = daily.get("precipitation_probability_max", [])
+    code_list = daily.get("weather_code", [])
+
+    # Necesitamos al menos 2 días (hoy + mañana)
+    if len(t_max_list) < 2:
+        return ""
+
+    t_max = t_max_list[1]
+    t_min = t_min_list[1]
+    rain = rain_list[1] if len(rain_list) > 1 else 0
+    code = code_list[1] if len(code_list) > 1 else 0
+
+    desc, emoji = _WMO_DESCRIPTIONS.get(code, ("", "🌡"))
+    parts = [f"{emoji} Mañana en Málaga: {t_min:.0f}°–{t_max:.0f}°C, {desc}"]
+
+    if rain > 20:
+        parts.append(f"— 🌂 {rain:.0f}% prob. lluvia")
+    if t_max >= 35:
+        parts.append(f"— 🥵 ¡{t_max:.0f}°C de máxima!")
+
+    return " ".join(parts)
+
+
 # ── Bitcoin ─────────────────────────────────────────────────────────
 
 
@@ -1143,11 +1193,16 @@ def send_news_briefing() -> bool:
 
 
 def send_evening_briefing() -> bool:
-    """Genera y envía el briefing de tarde: Bitcoin + deporte."""
+    """Genera y envía el briefing de tarde: previsión mañana + Bitcoin + deporte."""
     now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
 
     blocks: list[str] = []
+
+    # ── Previsión de mañana ──────────────────────────────────────────
+    tomorrow_weather = fetch_tomorrow_weather_block()
+    if tomorrow_weather:
+        blocks.append(tomorrow_weather)
 
     # ── Bitcoin ──────────────────────────────────────────────────────
     bitcoin = fetch_bitcoin_block()
@@ -1160,7 +1215,7 @@ def send_evening_briefing() -> bool:
         blocks.append("📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures))
 
     if not blocks:
-        log.info("[Evening] Sin datos de Bitcoin ni fixtures.")
+        log.info("[Evening] Sin datos para el briefing de tarde.")
         return False
 
     message = f"🌙 BRIEFING DE TARDE — {date_str}\n\n" + "\n\n".join(blocks)

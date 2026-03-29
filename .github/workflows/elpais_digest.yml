@@ -6,7 +6,7 @@
 #
 # GitHub Actions usa UTC:
 #   7:00 UTC = 9:00 CEST (verano) / 8:00 CET (invierno)
-#  19:00 UTC = 21:00 CEST (verano) / 20:00 CET (invierno)
+#  20:00 UTC = 22:00 CEST (verano) / 21:00 CET (invierno)
 
 name: BlitzBrief Daily Digest
 
@@ -14,8 +14,8 @@ on:
   schedule:
     # Mañana: 7:00 UTC → 9:00 verano / 8:00 invierno
     - cron: "0 7 * * *"
-    # Tarde: 19:00 UTC → 21:00 verano / 20:00 invierno
-    - cron: "0 19 * * *"
+    # Tarde: 20:00 UTC → 22:00 verano / 21:00 invierno
+    - cron: "0 20 * * *"
 
   # Permite ejecución manual desde la pestaña Actions de GitHub
   workflow_dispatch:
