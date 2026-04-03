@@ -1,0 +1,52 @@
+# .github/workflows/blitzhealth_digest.yml
+#
+# Ejecuta BlitzHealth cada domingo por la mañana (hora de España):
+#   8:00 UTC = 10:00 CEST (verano) / 9:00 CET (invierno)
+#
+# Genera un digest semanal de salud/fitness, lo envía por Telegram
+# y guarda el markdown en digests/health/.
+
+name: BlitzHealth Weekly Digest
+
+on:
+  schedule:
+    # Domingos a las 8:00 UTC → 10:00 verano / 9:00 invierno
+    - cron: "0 8 * * 0"
+
+  # Permite ejecución manual
+  workflow_dispatch:
+
+jobs:
+  health-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run BlitzHealth
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python blitzhealth.py
+
+      - name: Commit and push digest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add digests/health/
+          if git diff --staged --quiet; then
+            echo "No hay cambios que commitear."
+          else
+            git commit -m "📝 BlitzHealth digest $(date -u +%Y-%m-%d)"
+            git push
+          fi
