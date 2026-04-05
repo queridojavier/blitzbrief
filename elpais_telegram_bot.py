@@ -813,7 +813,11 @@ def fetch_upcoming_fixtures() -> list[str]:
                 timeout=10,
             )
             resp.raise_for_status()
-            fixtures = resp.json().get("response", [])
+            data = resp.json()
+            fixtures = data.get("response", [])
+            log.info(f"[Fixtures] Fútbol {team_name}: {len(fixtures)} próximos partidos")
+            if not fixtures:
+                log.info(f"[Fixtures] Respuesta API fútbol: {data}")
         except requests.RequestException as e:
             log.warning(f"[Fixtures] Error fútbol {team_name}: {e}")
             continue
@@ -849,7 +853,11 @@ def fetch_upcoming_fixtures() -> list[str]:
                 timeout=10,
             )
             resp.raise_for_status()
-            games = resp.json().get("response", [])
+            data = resp.json()
+            games = data.get("response", [])
+            log.info(f"[Fixtures] Baloncesto {team_name}: {len(games)} próximos partidos")
+            if not games:
+                log.info(f"[Fixtures] Respuesta API baloncesto: {data}")
         except requests.RequestException as e:
             log.warning(f"[Fixtures] Error baloncesto {team_name}: {e}")
             continue
@@ -876,6 +884,7 @@ def fetch_upcoming_fixtures() -> list[str]:
             except (KeyError, ValueError):
                 continue
 
+    log.info(f"[Fixtures] Partidos de hoy: {len(lines)}")
     return lines
 
 
