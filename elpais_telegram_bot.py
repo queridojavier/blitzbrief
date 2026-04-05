@@ -799,8 +799,7 @@ def fetch_upcoming_fixtures() -> list[str]:
     tz_madrid = ZoneInfo("Europe/Madrid")
     now = datetime.now(tz_madrid)
     today = now.date()
-    tomorrow = today + timedelta(days=1)
-    target_dates = {today, tomorrow}
+    target_dates = {today}
 
     lines: list[str] = []
 
@@ -829,11 +828,10 @@ def fetch_upcoming_fixtures() -> list[str]:
                 away = fix["teams"]["away"]["name"]
                 league = fix["league"]["name"]
                 time_str = match_dt.strftime("%H:%M")
-                when = "hoy" if match_dt.date() == today else "mañana"
                 channel = COMPETITION_TV_SPAIN.get(league, "")
                 channel_str = f" — {channel}" if channel else ""
                 lines.append(
-                    f"⚽ {home} vs {away} ({league}) — {when} {time_str}{channel_str}"
+                    f"⚽ {home} vs {away} ({league}) — {time_str}{channel_str}"
                 )
             except (KeyError, ValueError):
                 continue
@@ -870,11 +868,10 @@ def fetch_upcoming_fixtures() -> list[str]:
                 away = game["teams"]["away"]["name"]
                 league = game["league"]["name"]
                 time_str = match_dt.strftime("%H:%M")
-                when = "hoy" if match_dt.date() == today else "mañana"
                 channel = COMPETITION_TV_SPAIN.get(league, "")
                 channel_str = f" — {channel}" if channel else ""
                 lines.append(
-                    f"🏀 {home} vs {away} ({league}) — {when} {time_str}{channel_str}"
+                    f"🏀 {home} vs {away} ({league}) — {time_str}{channel_str}"
                 )
             except (KeyError, ValueError):
                 continue
@@ -1162,7 +1159,13 @@ def send_news_briefing() -> bool:
     weather = fetch_weather_block()
     weather_section = f"\n\n{weather}" if weather else ""
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}"
+    # Añadir partidos de hoy
+    fixtures = fetch_upcoming_fixtures()
+    fixtures_section = ""
+    if fixtures:
+        fixtures_section = "\n\n📅 PARTIDOS HOY:\n" + "\n".join(fixtures)
+
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}{fixtures_section}"
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -1208,11 +1211,6 @@ def send_evening_briefing() -> bool:
     bitcoin = fetch_bitcoin_block()
     if bitcoin:
         blocks.append(bitcoin)
-
-    # ── Fixtures deportivos ──────────────────────────────────────────
-    fixtures = fetch_upcoming_fixtures()
-    if fixtures:
-        blocks.append("📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures))
 
     if not blocks:
         log.info("[Evening] Sin datos para el briefing de tarde.")
