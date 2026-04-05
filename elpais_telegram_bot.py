@@ -771,7 +771,7 @@ def _get_basketball_team_id(team_name: str) -> Optional[int]:
 
     try:
         resp = requests.get(
-            "https://v3.basketball.api-sports.io/teams",
+            "https://v1.basketball.api-sports.io/teams",
             headers={"x-apisports-key": API_SPORTS_KEY},
             params={"name": team_name, "country": "Spain"},
             timeout=10,
@@ -790,7 +790,7 @@ def _get_basketball_team_id(team_name: str) -> Optional[int]:
 
 def fetch_upcoming_fixtures() -> list[str]:
     """
-    Devuelve líneas con partidos de hoy o mañana para los equipos seguidos.
+    Devuelve líneas con partidos de hoy para los equipos seguidos.
     Requiere API_SPORTS_KEY de https://www.api-sports.io/ (plan gratuito: 100 req/día).
     """
     if not API_SPORTS_KEY:
@@ -798,36 +798,34 @@ def fetch_upcoming_fixtures() -> list[str]:
 
     tz_madrid = ZoneInfo("Europe/Madrid")
     now = datetime.now(tz_madrid)
-    today = now.date()
-    target_dates = {today}
+    today_str = now.strftime("%Y-%m-%d")
 
     lines: list[str] = []
 
     # ── Fútbol ──────────────────────────────────────────────────────
+    # Plan gratuito no soporta "next", usamos búsqueda por fecha
     for team_name, team_id in FOLLOWED_FOOTBALL_TEAMS.items():
         try:
             resp = requests.get(
                 "https://v3.football.api-sports.io/fixtures",
                 headers={"x-apisports-key": API_SPORTS_KEY},
-                params={"team": team_id, "next": 5},
+                params={"team": team_id, "date": today_str},
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
             fixtures = data.get("response", [])
-            log.info(f"[Fixtures] Fútbol {team_name}: {len(fixtures)} próximos partidos")
-            if not fixtures:
-                log.info(f"[Fixtures] Respuesta API fútbol: {data}")
+            log.info(f"[Fixtures] Fútbol {team_name}: {len(fixtures)} partidos hoy")
+            if not fixtures and data.get("errors"):
+                log.info(f"[Fixtures] Errores API: {data['errors']}")
         except requests.RequestException as e:
             log.warning(f"[Fixtures] Error fútbol {team_name}: {e}")
             continue
 
         for fix in fixtures:
             try:
-                date_str = fix["fixture"]["date"]  # ISO 8601 con tz
+                date_str = fix["fixture"]["date"]
                 match_dt = datetime.fromisoformat(date_str).astimezone(tz_madrid)
-                if match_dt.date() not in target_dates:
-                    continue
                 home = fix["teams"]["home"]["name"]
                 away = fix["teams"]["away"]["name"]
                 league = fix["league"]["name"]
@@ -841,23 +839,24 @@ def fetch_upcoming_fixtures() -> list[str]:
                 continue
 
     # ── Baloncesto ──────────────────────────────────────────────────
+    # La API de baloncesto usa el mismo dominio que fútbol en v3
     for team_name in FOLLOWED_BASKETBALL_TEAMS:
         team_id = _get_basketball_team_id(team_name)
         if not team_id:
             continue
         try:
             resp = requests.get(
-                "https://v3.basketball.api-sports.io/games",
+                "https://v1.basketball.api-sports.io/games",
                 headers={"x-apisports-key": API_SPORTS_KEY},
-                params={"team": team_id, "next": 5},
+                params={"team": team_id, "date": today_str},
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
             games = data.get("response", [])
-            log.info(f"[Fixtures] Baloncesto {team_name}: {len(games)} próximos partidos")
-            if not games:
-                log.info(f"[Fixtures] Respuesta API baloncesto: {data}")
+            log.info(f"[Fixtures] Baloncesto {team_name}: {len(games)} partidos hoy")
+            if not games and data.get("errors"):
+                log.info(f"[Fixtures] Errores API: {data['errors']}")
         except requests.RequestException as e:
             log.warning(f"[Fixtures] Error baloncesto {team_name}: {e}")
             continue
@@ -870,8 +869,6 @@ def fetch_upcoming_fixtures() -> list[str]:
                 match_dt = datetime.fromisoformat(
                     date_str.replace("Z", "+00:00")
                 ).astimezone(tz_madrid)
-                if match_dt.date() not in target_dates:
-                    continue
                 home = game["teams"]["home"]["name"]
                 away = game["teams"]["away"]["name"]
                 league = game["league"]["name"]
