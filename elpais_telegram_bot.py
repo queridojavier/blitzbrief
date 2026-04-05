@@ -799,6 +799,8 @@ def fetch_upcoming_fixtures() -> list[str]:
     tz_madrid = ZoneInfo("Europe/Madrid")
     now = datetime.now(tz_madrid)
     today_str = now.strftime("%Y-%m-%d")
+    # api-sports.io requiere el año de inicio de la temporada (2025 = temporada 2025-26)
+    season = now.year if now.month >= 7 else now.year - 1
 
     lines: list[str] = []
 
@@ -809,7 +811,7 @@ def fetch_upcoming_fixtures() -> list[str]:
             resp = requests.get(
                 "https://v3.football.api-sports.io/fixtures",
                 headers={"x-apisports-key": API_SPORTS_KEY},
-                params={"team": team_id, "date": today_str},
+                params={"team": team_id, "date": today_str, "season": season},
                 timeout=10,
             )
             resp.raise_for_status()
@@ -848,7 +850,7 @@ def fetch_upcoming_fixtures() -> list[str]:
             resp = requests.get(
                 "https://v1.basketball.api-sports.io/games",
                 headers={"x-apisports-key": API_SPORTS_KEY},
-                params={"team": team_id, "date": today_str},
+                params={"team": team_id, "date": today_str, "season": f"{season}-{season + 1}"},
                 timeout=10,
             )
             resp.raise_for_status()
