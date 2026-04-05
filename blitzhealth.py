@@ -252,9 +252,6 @@ Para cada autor que haya publicado algo, resume brevemente qué ha publicado (t�
 2. 🎯 PUNTOS CLAVE ACCIONABLES
 Las 3-5 ideas más prácticas y aplicables de todo lo publicado esta semana. Cosas concretas que alguien puede hacer.
 
-3. ⚡ DEBATES Y CONTRADICCIONES
-Si hay posturas opuestas, matices interesantes o temas donde los autores discrepan, destácalos. Si no los hay, indica brevemente los temas en común.
-
 REGLAS:
 - Todo en español
 - Conciso pero completo
@@ -335,29 +332,12 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
     return chunks
 
 
-def _strip_debates_section(digest: str) -> str:
-    """Elimina la sección de Debates y Contradicciones del digest.
-
-    Esa sección solo tiene valor en el markdown (para la base de datos),
-    no en el mensaje de Telegram.
-    """
-    import re
-    # Eliminar desde "⚡ DEBATES" hasta el final o hasta la siguiente sección
-    return re.sub(
-        r"\n*⚡\s*DEBATES Y CONTRADICCIONES.*",
-        "",
-        digest,
-        flags=re.DOTALL,
-    ).rstrip()
-
-
 def send_telegram_digest(digest: str) -> bool:
-    """Envía el digest por Telegram (sin sección de debates)."""
+    """Envía el digest por Telegram como texto plano."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
         return False
 
-    telegram_digest = _strip_debates_section(digest)
     now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
     message = f"🏋️ BLITZHEALTH — Semana del {date_str}\n\n{telegram_digest}"
