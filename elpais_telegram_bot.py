@@ -48,8 +48,6 @@ from bs4 import BeautifulSoup
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# API gratuita de deportes (100 req/día) — https://www.api-sports.io/
-API_SPORTS_KEY = os.environ.get("API_SPORTS_KEY", "")
 
 # ── Autores (cargados desde authors.json) ─────────────────────────
 # El archivo authors.json contiene tres secciones:
@@ -93,20 +91,21 @@ USER_AGENT = (
 # Archivo local para evitar enviar duplicados entre ejecuciones
 SEEN_FILE = Path(__file__).parent / ".elpais_seen_articles.json"
 AUTHORS_FILE = Path(__file__).parent / "authors.json"
-# Caché de IDs de equipos deportivos (se auto-rellena en el primer uso)
-SPORTS_ID_CACHE_FILE = Path(__file__).parent / ".sports_ids_cache.json"
 
 # ── Equipos a seguir ───────────────────────────────────────────────
-# Fútbol: IDs de api-football.com (v3.football.api-sports.io)
-FOLLOWED_FOOTBALL_TEAMS: dict[str, int] = {
-    "Real Madrid": 541,
-    "Málaga CF": 724,
-}
-# Baloncesto: nombres para búsqueda en api-basketball.com
-# (los IDs se resuelven automáticamente y se cachean en .sports_ids_cache.json)
-FOLLOWED_BASKETBALL_TEAMS: list[str] = [
+# Fútbol: equipos a seguir (nombres tal como aparecen en ESPN)
+FOLLOWED_FOOTBALL_TEAMS: list[str] = [
     "Real Madrid",
-    "Unicaja",
+    "Málaga",
+]
+
+# Ligas ESPN a consultar para fútbol
+ESPN_FOOTBALL_LEAGUES: list[str] = [
+    "esp.1",            # La Liga
+    "esp.2",            # Segunda División
+    "uefa.champions",   # Champions League
+    "uefa.europa",      # Europa League
+    "esp.copa_del_rey", # Copa del Rey
 ]
 
 # Canal de TV típico por competición en España (derechos 2025-26)
@@ -746,141 +745,77 @@ def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
     return headlines
 
 
-# ── Fixtures deportivos ────────────────────────────────────────────
-
-
-def _load_sports_id_cache() -> dict:
-    if SPORTS_ID_CACHE_FILE.exists():
-        try:
-            return json.loads(SPORTS_ID_CACHE_FILE.read_text())
-        except (json.JSONDecodeError, KeyError):
-            pass
-    return {}
-
-
-def _save_sports_id_cache(cache: dict) -> None:
-    SPORTS_ID_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
-
-
-def _get_basketball_team_id(team_name: str) -> Optional[int]:
-    """Resuelve el ID de un equipo de baloncesto en api-sports.io (con caché local)."""
-    cache = _load_sports_id_cache()
-    cache_key = f"basketball:{team_name}"
-    if cache_key in cache:
-        return cache[cache_key]
-
-    try:
-        resp = requests.get(
-            "https://v1.basketball.api-sports.io/teams",
-            headers={"x-apisports-key": API_SPORTS_KEY},
-            params={"name": team_name, "country": "Spain"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        results = resp.json().get("response", [])
-        if results:
-            team_id = results[0]["id"]
-            cache[cache_key] = team_id
-            _save_sports_id_cache(cache)
-            return team_id
-    except requests.RequestException as e:
-        log.warning(f"[Fixtures] No se pudo resolver ID baloncesto de {team_name}: {e}")
-    return None
+# ── Fixtures deportivos (ESPN API — gratuita, sin clave) ───────────
 
 
 def fetch_upcoming_fixtures() -> list[str]:
     """
     Devuelve líneas con partidos de hoy para los equipos seguidos.
-    Requiere API_SPORTS_KEY de https://www.api-sports.io/ (plan gratuito: 100 req/día).
+    Usa la API pública de ESPN (sin clave, sin registro).
     """
-    if not API_SPORTS_KEY:
-        return []
-
     tz_madrid = ZoneInfo("Europe/Madrid")
     now = datetime.now(tz_madrid)
-    today_str = now.strftime("%Y-%m-%d")
-    # api-sports.io requiere el año de inicio de la temporada (2025 = temporada 2025-26)
-    season = now.year if now.month >= 7 else now.year - 1
+    today_str = now.strftime("%Y%m%d")
 
     lines: list[str] = []
+    seen_events: set[str] = set()  # evitar duplicados entre ligas
 
-    # ── Fútbol ──────────────────────────────────────────────────────
-    # Plan gratuito no soporta "next", usamos búsqueda por fecha
-    for team_name, team_id in FOLLOWED_FOOTBALL_TEAMS.items():
+    # Nombres de equipos en minúsculas para comparar
+    followed = {t.lower() for t in FOLLOWED_FOOTBALL_TEAMS}
+
+    for league in ESPN_FOOTBALL_LEAGUES:
         try:
-            resp = requests.get(
-                "https://v3.football.api-sports.io/fixtures",
-                headers={"x-apisports-key": API_SPORTS_KEY},
-                params={"team": team_id, "date": today_str, "season": season},
-                timeout=10,
+            url = (
+                f"https://site.api.espn.com/apis/site/v2/sports/soccer/"
+                f"{league}/scoreboard?dates={today_str}"
             )
+            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
             resp.raise_for_status()
             data = resp.json()
-            fixtures = data.get("response", [])
-            log.info(f"[Fixtures] Fútbol {team_name}: {len(fixtures)} partidos hoy")
-            if not fixtures and data.get("errors"):
-                log.info(f"[Fixtures] Errores API: {data['errors']}")
         except requests.RequestException as e:
-            log.warning(f"[Fixtures] Error fútbol {team_name}: {e}")
+            log.warning(f"[Fixtures] Error ESPN {league}: {e}")
             continue
 
-        for fix in fixtures:
+        events = data.get("events", [])
+        for event in events:
             try:
-                date_str = fix["fixture"]["date"]
-                match_dt = datetime.fromisoformat(date_str).astimezone(tz_madrid)
-                home = fix["teams"]["home"]["name"]
-                away = fix["teams"]["away"]["name"]
-                league = fix["league"]["name"]
-                time_str = match_dt.strftime("%H:%M")
-                channel = COMPETITION_TV_SPAIN.get(league, "")
-                channel_str = f" — {channel}" if channel else ""
-                lines.append(
-                    f"⚽ {home} vs {away} ({league}) — {time_str}{channel_str}"
-                )
-            except (KeyError, ValueError):
-                continue
-
-    # ── Baloncesto ──────────────────────────────────────────────────
-    # La API de baloncesto usa el mismo dominio que fútbol en v3
-    for team_name in FOLLOWED_BASKETBALL_TEAMS:
-        team_id = _get_basketball_team_id(team_name)
-        if not team_id:
-            continue
-        try:
-            resp = requests.get(
-                "https://v1.basketball.api-sports.io/games",
-                headers={"x-apisports-key": API_SPORTS_KEY},
-                params={"team": team_id, "date": today_str, "season": f"{season}-{season + 1}"},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            games = data.get("response", [])
-            log.info(f"[Fixtures] Baloncesto {team_name}: {len(games)} partidos hoy")
-            if not games and data.get("errors"):
-                log.info(f"[Fixtures] Errores API: {data['errors']}")
-        except requests.RequestException as e:
-            log.warning(f"[Fixtures] Error baloncesto {team_name}: {e}")
-            continue
-
-        for game in games:
-            try:
-                date_str = game.get("date", "")
-                if not date_str:
+                event_id = event["id"]
+                if event_id in seen_events:
                     continue
-                match_dt = datetime.fromisoformat(
-                    date_str.replace("Z", "+00:00")
-                ).astimezone(tz_madrid)
-                home = game["teams"]["home"]["name"]
-                away = game["teams"]["away"]["name"]
-                league = game["league"]["name"]
-                time_str = match_dt.strftime("%H:%M")
-                channel = COMPETITION_TV_SPAIN.get(league, "")
+
+                competitors = event["competitions"][0]["competitors"]
+                home = competitors[0]["team"]["displayName"]
+                away = competitors[1]["team"]["displayName"]
+
+                # Solo partidos de equipos seguidos
+                if not any(
+                    f in home.lower() or f in away.lower() for f in followed
+                ):
+                    continue
+
+                seen_events.add(event_id)
+
+                # Hora del partido (viene en UTC)
+                match_utc = datetime.fromisoformat(
+                    event["date"].replace("Z", "+00:00")
+                )
+                match_local = match_utc.astimezone(tz_madrid)
+                time_str = match_local.strftime("%H:%M")
+
+                league_name = event["competitions"][0]["type"].get(
+                    "abbreviation", data.get("leagues", [{}])[0].get("name", league)
+                )
+                # Intentar usar el nombre de la liga del evento
+                if "season" in event and "type" in event["season"]:
+                    league_name = event.get("name", league_name).split(" - ")[0]
+                league_name = data.get("leagues", [{}])[0].get("name", league)
+
+                channel = COMPETITION_TV_SPAIN.get(league_name, "")
                 channel_str = f" — {channel}" if channel else ""
                 lines.append(
-                    f"🏀 {home} vs {away} ({league}) — {time_str}{channel_str}"
+                    f"⚽ {home} vs {away} ({league_name}) — {time_str}{channel_str}"
                 )
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, IndexError):
                 continue
 
     log.info(f"[Fixtures] Partidos de hoy: {len(lines)}")
