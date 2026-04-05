@@ -340,7 +340,7 @@ def send_telegram_digest(digest: str) -> bool:
 
     now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
-    message = f"🏋️ BLITZHEALTH — Semana del {date_str}\n\n{telegram_digest}"
+    message = f"🏋️ BLITZHEALTH — Semana del {date_str}\n\n{digest}"
 
     success = True
     for chunk in _split_message(message, max_len=3000):
