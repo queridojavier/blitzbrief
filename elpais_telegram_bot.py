@@ -72,7 +72,7 @@ NEWS_SOURCES: dict[str, str] = {
     "The Guardian": "https://www.theguardian.com/world/rss",
     "New York Times": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "Marca": "https://e00-marca.uecdn.es/rss/portada.xml",
-    "Diario AS": "https://as.com/rss/",
+    "Diario AS": "https://feeds.as.com/mrss-s/pages/as/site/as.com/portada",
     "El Confidencial": "https://rss.elconfidencial.com/",
     "OpenAI Blog": "https://openai.com/blog/rss.xml",
     "9to5Mac": "https://9to5mac.com/feed/",
@@ -110,9 +110,10 @@ FOLLOWED_TEAMS_KEYWORDS: list[str] = [
 SPORTS_SOURCES: dict[str, str] = {
     "Marca Fútbol": "https://e00-marca.uecdn.es/rss/futbol.xml",
     "Marca Real Madrid": "https://e00-marca.uecdn.es/rss/futbol/real-madrid.xml",
+    "Marca Málaga": "https://e00-marca.uecdn.es/rss/futbol/malaga.xml",
     "Marca Baloncesto": "https://e00-marca.uecdn.es/rss/baloncesto.xml",
-    "AS Fútbol": "https://as.com/rss/futbol.xml",
-    "AS Baloncesto": "https://as.com/rss/baloncesto.xml",
+    "AS Fútbol": "https://feeds.as.com/mrss-s/pages/as/site/as.com/futbol",
+    "AS Baloncesto": "https://feeds.as.com/mrss-s/pages/as/site/as.com/baloncesto",
     "La Opinión Deportes": "https://www.laopiniondemalaga.es/rss/section/11017",
     "Málaga Hoy Deportes": "https://www.malagahoy.es/rss/section/deportes/",
 }
