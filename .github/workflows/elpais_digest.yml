@@ -4,16 +4,17 @@
 #   - Mañana: briefing de noticias + tiempo + artículos de columnistas
 #   - Tarde:  deporte + Bitcoin + podcast de Jabois
 #
-# GitHub Actions usa UTC:
-#   7:00 UTC = 9:00 CEST (verano) / 8:00 CET (invierno)
+# GitHub Actions usa UTC (con ~30min de margen por retrasos de cola):
+#   6:30 UTC → ~8:30-9:00 CEST (verano) / ~7:30-8:00 CET (invierno)
 #  20:00 UTC = 22:00 CEST (verano) / 21:00 CET (invierno)
 
 name: BlitzBrief Daily Digest
 
 on:
   schedule:
-    # Mañana: 7:00 UTC → 9:00 verano / 8:00 invierno
-    - cron: "0 7 * * *"
+    # Mañana: 6:30 UTC → 8:30 verano / 7:30 invierno
+    # (margen de ~30min para retrasos de GitHub Actions)
+    - cron: "30 6 * * *"
     # Tarde: 20:00 UTC → 22:00 verano / 21:00 invierno
     - cron: "0 20 * * *"
 
@@ -51,7 +52,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "flag=--${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 7 * * *" ]; then
+          elif [ "${{ github.event.schedule }}" = "30 6 * * *" ]; then
             echo "flag=--morning" >> "$GITHUB_OUTPUT"
           else
             echo "flag=--evening" >> "$GITHUB_OUTPUT"
