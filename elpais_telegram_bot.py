@@ -72,7 +72,7 @@ NEWS_SOURCES: dict[str, str] = {
     "The Guardian": "https://www.theguardian.com/world/rss",
     "New York Times": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "Marca": "https://e00-marca.uecdn.es/rss/portada.xml",
-    "Diario AS": "https://news.google.com/rss/search?q=site:as.com&hl=es&gl=ES&ceid=ES:es",
+    "Diario AS": "https://feeds.as.com/mrss-s/pages/as/site/as.com/portada",
     "El Confidencial": "https://rss.elconfidencial.com/",
     "OpenAI Blog": "https://openai.com/blog/rss.xml",
     "9to5Mac": "https://9to5mac.com/feed/",
@@ -98,6 +98,25 @@ FOLLOWED_FOOTBALL_TEAMS: list[str] = [
     "Real Madrid",
     "Málaga",
 ]
+
+# Equipos de interés para filtrar noticias deportivas (en minúsculas)
+FOLLOWED_TEAMS_KEYWORDS: list[str] = [
+    "real madrid", "málaga", "malaga", "unicaja",
+    "málaga cf", "malaga cf",
+]
+
+# ── Fuentes deportivas dedicadas ──────────────────────────────────
+# Feeds RSS específicos de deporte para tener cobertura diaria
+SPORTS_SOURCES: dict[str, str] = {
+    "Marca Fútbol": "https://e00-marca.uecdn.es/rss/futbol.xml",
+    "Marca Real Madrid": "https://e00-marca.uecdn.es/rss/futbol/real-madrid.xml",
+    "Marca Málaga": "https://e00-marca.uecdn.es/rss/futbol/malaga.xml",
+    "Marca Baloncesto": "https://e00-marca.uecdn.es/rss/baloncesto.xml",
+    "AS Fútbol": "https://feeds.as.com/mrss-s/pages/as/site/as.com/futbol",
+    "AS Baloncesto": "https://feeds.as.com/mrss-s/pages/as/site/as.com/baloncesto",
+    "La Opinión Deportes": "https://www.laopiniondemalaga.es/rss/section/11017",
+    "Málaga Hoy Deportes": "https://www.malagahoy.es/rss/section/deportes/",
+}
 
 # Ligas ESPN a consultar para fútbol
 ESPN_FOOTBALL_LEAGUES: list[str] = [
@@ -822,6 +841,78 @@ def fetch_upcoming_fixtures() -> list[str]:
     return lines
 
 
+# ── Noticias deportivas dedicadas ──────────────────────────────────
+
+
+def fetch_sports_news_block(max_headlines: int = 5) -> str:
+    """
+    Recoge titulares deportivos de fuentes especializadas y filtra
+    los que mencionan a los equipos seguidos (Real Madrid, Málaga, Unicaja).
+    Devuelve un bloque de texto listo para Telegram.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    relevant: list[dict] = []
+    seen_titles: set[str] = set()
+
+    for source_name, feed_url in SPORTS_SOURCES.items():
+        xml_text, err = _fetch_page(feed_url)
+        if not xml_text:
+            log.warning(f"[Sports] No se pudo descargar {source_name}: {err}")
+            continue
+
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            log.warning(f"[Sports] XML inválido de {source_name}")
+            continue
+
+        for item in root.findall(".//item"):
+            title_el = item.find("title")
+            if title_el is None or not title_el.text:
+                continue
+
+            title = title_el.text.strip()
+            title_lower = title.lower()
+
+            # Evitar duplicados
+            if title_lower in seen_titles:
+                continue
+
+            # Filtrar por equipos de interés
+            if not any(kw in title_lower for kw in FOLLOWED_TEAMS_KEYWORDS):
+                continue
+
+            # Filtrar por fecha
+            pubdate_el = item.find("pubDate")
+            if pubdate_el is not None and pubdate_el.text:
+                try:
+                    pub_dt = parsedate_to_datetime(pubdate_el.text)
+                    if pub_dt < cutoff:
+                        continue
+                except Exception:
+                    pass
+
+            seen_titles.add(title_lower)
+            relevant.append({"source": source_name, "title": title})
+
+        log.info(f"[Sports] {source_name}: procesado")
+
+    if not relevant:
+        log.info("[Sports] Sin noticias deportivas relevantes hoy.")
+        return ""
+
+    # Limitar y formatear
+    relevant = relevant[:max_headlines]
+    lines = ["🏟 DEPORTES:"]
+    for h in relevant:
+        # Abreviar nombre de fuente
+        src = h["source"].split()[0]  # "Marca", "AS", "La", "Málaga"
+        lines.append(f"  • [{src}] {h['title']}")
+
+    log.info(f"[Sports] {len(relevant)} noticia(s) deportiva(s) relevantes.")
+    return "\n".join(lines)
+
+
 # ── Meteorología ────────────────────────────────────────────────────
 
 # Códigos WMO → descripción corta y emoji
@@ -1035,14 +1126,14 @@ FORMATO (una línea por sección):
 🏛 España: [la noticia nacional más relevante hoy]
 💰 Economía: [solo si hay algo económico realmente destacable]
 📍 Málaga: [solo si hay algo local relevante de Málaga o Andalucía]
-⚽ Deporte: [solo si hay noticias de Real Madrid, Málaga CF o Unicaja]
+⚽ Deporte: [noticias deportivas de Real Madrid (fútbol o baloncesto), Málaga CF o Unicaja]
 🤖 Tech: [solo si hay un lanzamiento, anuncio o novedad REAL de hoy]
 
 REGLAS ESTRICTAS:
 - UNA sola noticia por sección, la más importante, en UNA frase de máximo 15 palabras
 - OMITE secciones enteras si no hay nada genuinamente novedoso o relevante HOY
 - Para Tech: ignora noticias sobre productos ya lanzados hace días/semanas. Solo incluye si es algo nuevo de hoy
-- Para Deporte: solo incluye si hay partido hoy/mañana o fichaje/resultado de Real Madrid, Málaga CF o Unicaja
+- Para Deporte: incluye cualquier noticia sobre Real Madrid (fútbol O baloncesto), Málaga CF o Unicaja: resultados, fichajes, crónicas, lesiones, ruedas de prensa, etc. No te limites solo a partidos de hoy
 - Todo en español
 - NO uses asteriscos, negritas ni markdown
 - NO añadas introducción, cierre, fuentes ni relleno
@@ -1108,7 +1199,11 @@ def send_news_briefing() -> bool:
     if fixtures:
         fixtures_section = "\n\n📅 PARTIDOS HOY:\n" + "\n".join(fixtures)
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}{fixtures_section}"
+    # Añadir noticias deportivas de equipos seguidos
+    sports_news = fetch_sports_news_block()
+    sports_section = f"\n\n{sports_news}" if sports_news else ""
+
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}{fixtures_section}{sports_section}"
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
