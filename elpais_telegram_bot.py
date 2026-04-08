@@ -24,11 +24,13 @@ Uso local:
 """
 
 import os
+import re
 import sys
 import json
 import logging
 import hashlib
 import random
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -1141,33 +1143,41 @@ REGLAS ESTRICTAS:
 TITULARES:
 {headlines_text}"""
 
-    try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            "gemini-2.5-flash:generateContent"
-            f"?key={GEMINI_API_KEY}"
-        )
-        resp = requests.post(
-            url,
-            headers={"content-type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 8192},
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        candidates = data.get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if parts and parts[0].get("text"):
-                return parts[0]["text"]
-        log.error(f"[Briefing] Respuesta inesperada de Gemini: {data}")
-        return None
-    except requests.RequestException as e:
-        log.error(f"[Briefing] Error al llamar a Gemini API: {e}")
-        return None
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.5-flash:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 8192},
+    }
+
+    # Intentar hasta 2 veces (con 5s de espera entre intentos)
+    for attempt in range(2):
+        try:
+            resp = requests.post(
+                url,
+                headers={"content-type": "application/json"},
+                json=payload,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts and parts[0].get("text"):
+                    return parts[0]["text"]
+            log.error(f"[Briefing] Respuesta inesperada de Gemini: {data}")
+        except requests.RequestException as e:
+            log.error(f"[Briefing] Error al llamar a Gemini API (intento {attempt + 1}): {e}")
+
+        if attempt == 0:
+            log.info("[Briefing] Reintentando en 5 segundos...")
+            time.sleep(5)
+
+    return None
 
 
 def send_news_briefing() -> bool:
@@ -1345,7 +1355,7 @@ def _escape_md(text: str) -> str:
 
 
 def send_telegram_message(text: str) -> bool:
-    """Envía un mensaje por Telegram."""
+    """Envía un mensaje por Telegram (MarkdownV2, con splitting y fallback)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error(
             "Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID. "
@@ -1354,25 +1364,56 @@ def send_telegram_message(text: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    # Partir en trozos para no superar el límite de 4096 chars de Telegram
+    success = True
+    for chunk in _split_message(text, max_len=4000):
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": chunk,
+            "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True,
+        }
+
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("ok"):
+                log.info("Mensaje enviado correctamente a Telegram.")
+            else:
+                log.error(f"Error de Telegram: {data}")
+                # Fallback: reenviar sin MarkdownV2 si falla el parseo
+                success = _send_plain_fallback(url, chunk) and success
+        except requests.RequestException as e:
+            log.error(f"Error al enviar mensaje: {e}")
+            success = False
+
+    return success
+
+
+def _send_plain_fallback(url: str, text: str) -> bool:
+    """Reenvía un mensaje como texto plano si MarkdownV2 falló."""
+    log.info("[Fallback] Reintentando sin MarkdownV2...")
+    # Limpiar marcas de Markdown para texto plano
+    plain = re.sub(r"\\(.)", r"\1", text)  # quitar backslash-escaping
+    plain = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", plain)  # [text](url) → text
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "MarkdownV2",
+        "text": plain,
         "disable_web_page_preview": True,
     }
-
     try:
         resp = requests.post(url, json=payload, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         if data.get("ok"):
-            log.info("Mensaje enviado correctamente a Telegram.")
+            log.info("[Fallback] Mensaje enviado como texto plano.")
             return True
-        else:
-            log.error(f"Error de Telegram: {data}")
-            return False
+        log.error(f"[Fallback] Error de Telegram: {data}")
+        return False
     except requests.RequestException as e:
-        log.error(f"Error al enviar mensaje: {e}")
+        log.error(f"[Fallback] Error al enviar: {e}")
         return False
 
 
@@ -1724,7 +1765,6 @@ def serve() -> None:
             break
         except Exception as e:
             log.error(f"Error en el bucle de polling: {e}")
-            import time
             time.sleep(5)
 
 
