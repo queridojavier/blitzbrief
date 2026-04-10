@@ -1483,8 +1483,8 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
                     all_new_articles.append(art)
             log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
-    # ── Podcasts (tarde o full) ──────────────────────────────────────
-    if mode in ("evening", "full"):
+    # ── Podcasts (mañana o full — el audio se publica de madrugada) ──
+    if mode in ("morning", "full"):
         for label, config in PODCAST_SOURCES.items():
             feed_url = config.get("feed", "")
             title_filter = config.get("filter", "")
