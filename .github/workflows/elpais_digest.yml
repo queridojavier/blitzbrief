@@ -2,11 +2,12 @@
 #
 # Ejecuta el bot dos veces al día (hora de España peninsular):
 #   - Mañana: briefing de noticias + tiempo + artículos de columnistas
-#   - Tarde:  deporte + Bitcoin + podcast de Jabois
+#   - Tarde:  deporte + Bitcoin
+#   - Mañana: también incluye el podcast de Jabois (publicado de madrugada)
 #
 # GitHub Actions usa UTC (con ~30min de margen por retrasos de cola):
 #   6:30 UTC → ~8:30-9:00 CEST (verano) / ~7:30-8:00 CET (invierno)
-#  20:00 UTC = 22:00 CEST (verano) / 21:00 CET (invierno)
+#  19:00 UTC = 21:00 CEST (verano) / 20:00 CET (invierno)
 
 name: BlitzBrief Daily Digest
 
@@ -15,8 +16,8 @@ on:
     # Mañana: 6:30 UTC → 8:30 verano / 7:30 invierno
     # (margen de ~30min para retrasos de GitHub Actions)
     - cron: "30 6 * * *"
-    # Tarde: 20:00 UTC → 22:00 verano / 21:00 invierno
-    - cron: "0 20 * * *"
+    # Tarde: 19:00 UTC → 21:00 verano / 20:00 invierno
+    - cron: "0 19 * * *"
 
   # Permite ejecución manual desde la pestaña Actions de GitHub
   workflow_dispatch:

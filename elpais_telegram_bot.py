@@ -237,21 +237,20 @@ def remove_author(name: str) -> str:
         return f"❌ No se encontró a '{name}' en ninguna fuente."
 
 
-def load_seen_articles() -> set[str]:
-    """Carga los hashes de artículos ya enviados."""
+def load_seen_articles() -> list[str]:
+    """Carga los hashes de artículos ya enviados (preservando orden)."""
     if SEEN_FILE.exists():
         try:
             data = json.loads(SEEN_FILE.read_text())
-            return set(data.get("seen", []))
+            return list(data.get("seen", []))
         except (json.JSONDecodeError, KeyError):
-            return set()
-    return set()
+            return []
+    return []
 
 
-def save_seen_articles(seen: set[str]) -> None:
-    """Guarda los hashes de artículos ya enviados (máx. 500 últimos)."""
-    trimmed = list(seen)[-500:]
-    SEEN_FILE.write_text(json.dumps({"seen": trimmed}))
+def save_seen_articles(seen: list[str]) -> None:
+    """Guarda los hashes de artículos ya enviados (máx. 500, los más recientes)."""
+    SEEN_FILE.write_text(json.dumps({"seen": seen[-500:]}))
 
 
 def article_hash(url: str) -> str:
@@ -524,7 +523,7 @@ def fetch_podcast_segments(
         if not title.lower().startswith(filter_lower):
             continue
 
-        # Fecha
+        # Fecha (obligatoria para podcasts — sin fecha se descarta)
         pub_el = item.find("pubDate")
         pub_date = None
         if pub_el is not None and pub_el.text:
@@ -533,7 +532,7 @@ def fetch_podcast_segments(
             except (ValueError, TypeError):
                 pass
 
-        if pub_date and pub_date < cutoff:
+        if not pub_date or pub_date < cutoff:
             continue
 
         # URL del audio (enclosure)
@@ -1313,12 +1312,20 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
     return chunks
 
 
+def _spanish_date(dt: datetime) -> str:
+    """Formatea una fecha en español (sin depender del locale del sistema)."""
+    days = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+    months = [
+        "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+    ]
+    return f"{days[dt.weekday()].capitalize()} {dt.day} de {months[dt.month - 1]} de {dt.year}"
+
+
 def format_telegram_message(all_articles: list[dict]) -> str:
     """Formatea el mensaje de Telegram con Markdown."""
-    now = datetime.now(timezone.utc).astimezone(
-        timezone(timedelta(hours=1))  # CET
-    )
-    date_str = now.strftime("%A %d de %B de %Y").capitalize()
+    now = datetime.now(ZoneInfo("Europe/Madrid"))
+    date_str = _spanish_date(now)
 
     lines = [f"📰 *Tu prensa del día*", f"_{date_str}_", ""]
 
@@ -1445,6 +1452,7 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen = load_seen_articles()
+    seen_set = set(seen)          # set auxiliar para búsquedas O(1)
     all_new_articles: list[dict] = []
     podcast_segments: list[dict] = []
     fetch_errors: list[str] = []
@@ -1455,34 +1463,28 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
             log.info(f"[El País] Consultando: {author_name} ({slug})")
             articles = fetch_elpais_articles(author_name, slug, cutoff, fetch_errors)
             for art in articles:
-                h = article_hash(art["url"])
-                if h not in seen:
+                if article_hash(art["url"]) not in seen_set:
                     all_new_articles.append(art)
-                    seen.add(h)
             log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
         for author_name, slug in ELPLURAL_AUTHORS.items():
             log.info(f"[El Plural] Consultando: {author_name} ({slug})")
             articles = fetch_elplural_articles(author_name, slug, cutoff, fetch_errors)
             for art in articles:
-                h = article_hash(art["url"])
-                if h not in seen:
+                if article_hash(art["url"]) not in seen_set:
                     all_new_articles.append(art)
-                    seen.add(h)
             log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
         for author_name, feed_url in RSS_AUTHORS.items():
             log.info(f"[RSS] Consultando: {author_name}")
             articles = fetch_rss_articles(author_name, feed_url, cutoff, fetch_errors)
             for art in articles:
-                h = article_hash(art["url"])
-                if h not in seen:
+                if article_hash(art["url"]) not in seen_set:
                     all_new_articles.append(art)
-                    seen.add(h)
             log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
-    # ── Podcasts (tarde o full) ──────────────────────────────────────
-    if mode in ("evening", "full"):
+    # ── Podcasts (mañana o full — el audio se publica de madrugada) ──
+    if mode in ("morning", "full"):
         for label, config in PODCAST_SOURCES.items():
             feed_url = config.get("feed", "")
             title_filter = config.get("filter", "")
@@ -1493,10 +1495,8 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
                 label, feed_url, title_filter, cutoff, fetch_errors
             )
             for seg in segments:
-                h = article_hash(seg["audio_url"])
-                if h not in seen:
+                if article_hash(seg["audio_url"]) not in seen_set:
                     podcast_segments.append(seg)
-                    seen.add(h)
             log.info(f"  → {len(segments)} segmento(s) encontrado(s)")
 
     # ── Enviar artículos ─────────────────────────────────────────────
@@ -1512,6 +1512,10 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
         )
         success = send_telegram_message(message)
         if success:
+            for art in all_new_articles:
+                h = article_hash(art["url"])
+                seen.append(h)
+                seen_set.add(h)
             save_seen_articles(seen)
     else:
         log.info("No hay artículos nuevos.")
@@ -1522,11 +1526,14 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
     # ── Enviar audios de podcast ─────────────────────────────────────
     for seg in podcast_segments:
         if seg["audio_url"]:
-            send_telegram_audio(
+            audio_sent = send_telegram_audio(
                 seg["audio_url"], seg["title"], seg.get("duration", "")
             )
-
-    save_seen_articles(seen)
+            if audio_sent:
+                h = article_hash(seg["audio_url"])
+                seen.append(h)
+                seen_set.add(h)
+                save_seen_articles(seen)
 
     # ── Alertas de errores ───────────────────────────────────────────
     if fetch_errors:
