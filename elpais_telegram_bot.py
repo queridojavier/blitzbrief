@@ -680,11 +680,20 @@ def fetch_random_elpais_article(slug: str) -> Optional[dict]:
 
 
 def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
-    """Recoge titulares recientes de todas las fuentes de noticias."""
+    """Recoge titulares recientes de todas las fuentes de noticias.
+
+    Incluye las fuentes deportivas especializadas (Marca, AS, etc.) con un
+    límite menor para que Gemini elija el titular deportivo más relevante
+    junto al resto de categorías, en lugar de listarlos en bruto.
+    """
     headlines: list[dict] = []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
-    for source_name, feed_url in NEWS_SOURCES.items():
+    # Fuentes generales + deportivas; las deportivas con límite más bajo
+    all_sources = {**NEWS_SOURCES, **SPORTS_SOURCES}
+
+    for source_name, feed_url in all_sources.items():
+        limit = 4 if source_name in SPORTS_SOURCES else max_per_source
         xml_text, err = _fetch_page(feed_url)
         if not xml_text:
             log.warning(f"[Briefing] No se pudo descargar {source_name}: {err}")
@@ -699,7 +708,7 @@ def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
         count = 0
         # RSS estándar
         for item in root.findall(".//item"):
-            if count >= max_per_source:
+            if count >= limit:
                 break
             title_el = item.find("title")
             desc_el = item.find("description")
@@ -730,7 +739,7 @@ def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
         if count == 0:
             ns = {"atom": "http://www.w3.org/2005/Atom"}
             for entry in root.findall(".//atom:entry", ns):
-                if count >= max_per_source:
+                if count >= limit:
                     break
                 title_el = entry.find("atom:title", ns)
                 summary_el = entry.find("atom:summary", ns)
@@ -840,78 +849,6 @@ def fetch_upcoming_fixtures() -> list[str]:
 
     log.info(f"[Fixtures] Partidos de hoy: {len(lines)}")
     return lines
-
-
-# ── Noticias deportivas dedicadas ──────────────────────────────────
-
-
-def fetch_sports_news_block(max_headlines: int = 5) -> str:
-    """
-    Recoge titulares deportivos de fuentes especializadas y filtra
-    los que mencionan a los equipos seguidos (Real Madrid, Málaga, Unicaja).
-    Devuelve un bloque de texto listo para Telegram.
-    """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    relevant: list[dict] = []
-    seen_titles: set[str] = set()
-
-    for source_name, feed_url in SPORTS_SOURCES.items():
-        xml_text, err = _fetch_page(feed_url)
-        if not xml_text:
-            log.warning(f"[Sports] No se pudo descargar {source_name}: {err}")
-            continue
-
-        try:
-            root = ET.fromstring(xml_text)
-        except ET.ParseError:
-            log.warning(f"[Sports] XML inválido de {source_name}")
-            continue
-
-        for item in root.findall(".//item"):
-            title_el = item.find("title")
-            if title_el is None or not title_el.text:
-                continue
-
-            title = title_el.text.strip()
-            title_lower = title.lower()
-
-            # Evitar duplicados
-            if title_lower in seen_titles:
-                continue
-
-            # Filtrar por equipos de interés
-            if not any(kw in title_lower for kw in FOLLOWED_TEAMS_KEYWORDS):
-                continue
-
-            # Filtrar por fecha
-            pubdate_el = item.find("pubDate")
-            if pubdate_el is not None and pubdate_el.text:
-                try:
-                    pub_dt = parsedate_to_datetime(pubdate_el.text)
-                    if pub_dt < cutoff:
-                        continue
-                except Exception:
-                    pass
-
-            seen_titles.add(title_lower)
-            relevant.append({"source": source_name, "title": title})
-
-        log.info(f"[Sports] {source_name}: procesado")
-
-    if not relevant:
-        log.info("[Sports] Sin noticias deportivas relevantes hoy.")
-        return ""
-
-    # Limitar y formatear
-    relevant = relevant[:max_headlines]
-    lines = ["🏟 DEPORTES:"]
-    for h in relevant:
-        # Abreviar nombre de fuente
-        src = h["source"].split()[0]  # "Marca", "AS", "La", "Málaga"
-        lines.append(f"  • [{src}] {h['title']}")
-
-    log.info(f"[Sports] {len(relevant)} noticia(s) deportiva(s) relevantes.")
-    return "\n".join(lines)
 
 
 # ── Meteorología ────────────────────────────────────────────────────
@@ -1127,7 +1064,7 @@ FORMATO (una línea por sección):
 🏛 España: [la noticia nacional más relevante hoy]
 💰 Economía: [solo si hay algo económico realmente destacable]
 📍 Málaga: [solo si hay algo local relevante de Málaga o Andalucía]
-⚽ Deporte: [noticias deportivas de Real Madrid (fútbol o baloncesto), Málaga CF o Unicaja]
+⚽ Deporte: [la noticia más importante hoy sobre Real Madrid (fútbol o baloncesto), Málaga CF o Unicaja: resultado, lesión, fichaje, rueda de prensa, etc.]
 🤖 Tech: [solo si hay un lanzamiento, anuncio o novedad REAL de hoy]
 
 REGLAS ESTRICTAS:
@@ -1208,11 +1145,7 @@ def send_news_briefing() -> bool:
     if fixtures:
         fixtures_section = "\n\n📅 PARTIDOS HOY:\n" + "\n".join(fixtures)
 
-    # Añadir noticias deportivas de equipos seguidos
-    sports_news = fetch_sports_news_block()
-    sports_section = f"\n\n{sports_news}" if sports_news else ""
-
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}{fixtures_section}{sports_section}"
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}{fixtures_section}"
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
