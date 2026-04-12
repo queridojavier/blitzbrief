@@ -1,21 +1,20 @@
 # .github/workflows/elpais_digest.yml
 #
 # Ejecuta el bot dos veces al día (hora de España peninsular):
-#   - Mañana: briefing de noticias + tiempo + artículos de columnistas
-#   - Tarde:  deporte + Bitcoin
-#   - Mañana: también incluye el podcast de Jabois (publicado de madrugada)
+# Estructura de mensajes:
+#   Mañana → 1) Titulares (Gemini + partidos)  2) Tiempo actual  3) Audio Jabois
+#   Tarde  → 1) Artículos columnistas           2) Tiempo mañana  3) Bitcoin
 #
-# GitHub Actions usa UTC (con ~30min de margen por retrasos de cola):
-#   6:30 UTC → ~8:30-9:00 CEST (verano) / ~7:30-8:00 CET (invierno)
+# GitHub Actions usa UTC:
+#   5:00 UTC = 7:00 CEST (verano) / 6:00 CET (invierno)
 #  19:00 UTC = 21:00 CEST (verano) / 20:00 CET (invierno)
 
 name: BlitzBrief Daily Digest
 
 on:
   schedule:
-    # Mañana: 6:30 UTC → 8:30 verano / 7:30 invierno
-    # (margen de ~30min para retrasos de GitHub Actions)
-    - cron: "30 6 * * *"
+    # Mañana: 5:00 UTC → 7:00 verano / 6:00 invierno
+    - cron: "0 5 * * *"
     # Tarde: 19:00 UTC → 21:00 verano / 20:00 invierno
     - cron: "0 19 * * *"
 

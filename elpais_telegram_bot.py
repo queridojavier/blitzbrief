@@ -1117,7 +1117,7 @@ TITULARES:
 
 
 def send_news_briefing() -> bool:
-    """Genera y envía el briefing matutino: noticias + tiempo."""
+    """Genera y envía el briefing matutino: titulares del día + partidos."""
     log.info("[Briefing] Recopilando titulares...")
     headlines = fetch_news_headlines()
 
@@ -1131,95 +1131,61 @@ def send_news_briefing() -> bool:
     if not briefing:
         return False
 
-    # Enviar como texto plano (sin MarkdownV2 para evitar problemas de escape)
     now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
 
-    # Añadir bloque de tiempo
-    weather = fetch_weather_block()
-    weather_section = f"\n\n{weather}" if weather else ""
-
-    # Añadir partidos de hoy
+    # Partidos de hoy
     fixtures = fetch_upcoming_fixtures()
     fixtures_section = ""
     if fixtures:
         fixtures_section = "\n\n📅 PARTIDOS HOY:\n" + "\n".join(fixtures)
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{weather_section}{fixtures_section}"
-
-    # Enviar (partiendo en trozos si supera el límite de Telegram)
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.error("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
-        return False
-
-    success = True
-    for chunk in _split_message(message, max_len=3000):
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": chunk,
-        }
-        try:
-            resp = requests.post(url, json=payload, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("ok"):
-                log.error(f"[Briefing] Error de Telegram: {data}")
-                success = False
-        except requests.RequestException as e:
-            log.error(f"[Briefing] Error al enviar: {e}")
-            success = False
-
+    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{fixtures_section}"
+    success = _send_plain_message(message)
     if success:
         log.info("[Briefing] Enviado correctamente.")
     return success
 
 
 def send_evening_briefing() -> bool:
-    """Genera y envía el briefing de tarde: previsión mañana + Bitcoin + deporte."""
-    now = datetime.now(ZoneInfo("Europe/Madrid"))
-    date_str = now.strftime("%d/%m/%Y")
+    """Envía tiempo de mañana y Bitcoin como mensajes separados."""
+    sent_any = False
 
-    blocks: list[str] = []
-
-    # ── Previsión de mañana ──────────────────────────────────────────
     tomorrow_weather = fetch_tomorrow_weather_block()
     if tomorrow_weather:
-        blocks.append(tomorrow_weather)
+        _send_plain_message(tomorrow_weather)
+        sent_any = True
 
-    # ── Bitcoin ──────────────────────────────────────────────────────
     bitcoin = fetch_bitcoin_block()
     if bitcoin:
-        blocks.append(bitcoin)
+        _send_plain_message(bitcoin)
+        sent_any = True
 
-    if not blocks:
+    if not sent_any:
         log.info("[Evening] Sin datos para el briefing de tarde.")
-        return False
+    return sent_any
 
-    message = f"🌙 BRIEFING DE TARDE — {date_str}\n\n" + "\n\n".join(blocks)
 
+def _send_plain_message(text: str) -> bool:
+    """Envía un mensaje de texto plano (sin Markdown) a Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
         return False
-
-    success = True
-    for chunk in _split_message(message, max_len=3000):
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk}
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for chunk in _split_message(text, max_len=3000):
         try:
-            resp = requests.post(url, json=payload, timeout=15)
+            resp = requests.post(
+                url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk}, timeout=15
+            )
             resp.raise_for_status()
             data = resp.json()
             if not data.get("ok"):
-                log.error(f"[Evening] Error de Telegram: {data}")
-                success = False
+                log.error(f"[Telegram] Error: {data}")
+                return False
         except requests.RequestException as e:
-            log.error(f"[Evening] Error al enviar: {e}")
-            success = False
-
-    if success:
-        log.info("[Evening] Enviado correctamente.")
-    return success
+            log.error(f"[Telegram] Error al enviar: {e}")
+            return False
+    return True
 
 
 def _split_message(text: str, max_len: int = 4096) -> list[str]:
@@ -1365,23 +1331,27 @@ def _send_plain_fallback(url: str, text: str) -> bool:
 def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
     """Ejecuta el ciclo de envío por Telegram.
 
+    Estructura de mensajes:
+      Mañana  → 1) Titulares (Gemini + partidos)  2) Tiempo actual  3) Audio Jabois
+      Tarde   → 1) Artículos columnistas           2) Tiempo mañana  3) Bitcoin
+
     Args:
         notify_empty: si True, envía mensaje incluso cuando no hay artículos.
-        mode: "morning" (briefing + columnas), "evening" (deporte + bitcoin + podcast),
-              o "full" (todo junto, comportamiento clásico).
+        mode: "morning", "evening" o "full".
     """
     log.info(f"Iniciando BlitzBrief — modo {mode}...")
 
-    # ── Briefing matutino de noticias ─────────────────────────────────
+    # ── Mañana: mensaje 1 — Titulares ────────────────────────────────
     if mode in ("morning", "full"):
         if GEMINI_API_KEY:
             send_news_briefing()
         else:
             log.info("Sin GEMINI_API_KEY — briefing omitido.")
 
-    # ── Briefing de tarde (deporte + bitcoin) ─────────────────────────
-    if mode in ("evening", "full"):
-        send_evening_briefing()
+        # ── Mañana: mensaje 2 — Tiempo actual ────────────────────────
+        weather = fetch_weather_block()
+        if weather:
+            _send_plain_message(weather)
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen = load_seen_articles()
@@ -1390,8 +1360,8 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
     podcast_segments: list[dict] = []
     fetch_errors: list[str] = []
 
-    # ── Artículos de columnistas (mañana o full) ─────────────────────
-    if mode in ("morning", "full"):
+    # ── Tarde: artículos de columnistas (mensaje 1 de tarde) ─────────
+    if mode in ("evening", "full"):
         for author_name, slug in ELPAIS_AUTHORS.items():
             log.info(f"[El País] Consultando: {author_name} ({slug})")
             articles = fetch_elpais_articles(author_name, slug, cutoff, fetch_errors)
@@ -1416,7 +1386,7 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
                     all_new_articles.append(art)
             log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
-    # ── Podcasts (mañana o full — el audio se publica de madrugada) ──
+    # ── Mañana: podcast (mensaje 3 — audio publicado de madrugada) ───
     if mode in ("morning", "full"):
         for label, config in PODCAST_SOURCES.items():
             feed_url = config.get("feed", "")
@@ -1484,6 +1454,17 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
         )
         send_telegram_message("\n".join(error_lines))
         log.warning(f"{len(fetch_errors)} fuente(s) con errores.")
+
+    # ── Tarde: mensaje 2 — Tiempo de mañana ──────────────────────────
+    if mode in ("evening", "full"):
+        tomorrow = fetch_tomorrow_weather_block()
+        if tomorrow:
+            _send_plain_message(tomorrow)
+
+        # ── Tarde: mensaje 3 — Bitcoin ────────────────────────────────
+        bitcoin = fetch_bitcoin_block()
+        if bitcoin:
+            _send_plain_message(bitcoin)
 
     log.info("Hecho.")
 
