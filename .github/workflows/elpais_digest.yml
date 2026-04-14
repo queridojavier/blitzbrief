@@ -6,15 +6,15 @@
 #   Tarde  → 1) Artículos columnistas           2) Tiempo mañana  3) Bitcoin
 #
 # GitHub Actions usa UTC:
-#   4:00 UTC = 6:00 CEST (verano) — con retrasos habituales de GH Actions llega ~7:00
+#   5:00 UTC = 7:00 CEST (verano) — con retrasos habituales de GH Actions llega ~7:30-8:00
 #  19:00 UTC = 21:00 CEST (verano) / 20:00 CET (invierno)
 
 name: BlitzBrief Daily Digest
 
 on:
   schedule:
-    # Mañana: 4:00 UTC → ~7:00 verano contando retrasos de GitHub Actions
-    - cron: "0 4 * * *"
+    # Mañana: 5:00 UTC → 7:00 CEST (verano); con retrasos habituales llega ~7:30-8:00
+    - cron: "0 5 * * *"
     # Tarde: 19:00 UTC → 21:00 verano / 20:00 invierno
     - cron: "0 19 * * *"
 
@@ -60,7 +60,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "flag=--${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 4 * * *" ]; then
+          elif [ "${{ github.event.schedule }}" = "0 5 * * *" ]; then
             echo "flag=--morning" >> "$GITHUB_OUTPUT"
           else
             echo "flag=--evening" >> "$GITHUB_OUTPUT"
