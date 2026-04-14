@@ -1089,14 +1089,14 @@ TITULARES:
         "generationConfig": {"maxOutputTokens": 8192},
     }
 
-    # Intentar hasta 2 veces (con 5s de espera entre intentos)
-    for attempt in range(2):
+    # Intentar hasta 3 veces (con 10s de espera entre intentos)
+    for attempt in range(3):
         try:
             resp = requests.post(
                 url,
                 headers={"content-type": "application/json"},
                 json=payload,
-                timeout=60,
+                timeout=90,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -1109,9 +1109,9 @@ TITULARES:
         except requests.RequestException as e:
             log.error(f"[Briefing] Error al llamar a Gemini API (intento {attempt + 1}): {e}")
 
-        if attempt == 0:
-            log.info("[Briefing] Reintentando en 5 segundos...")
-            time.sleep(5)
+        if attempt < 2:
+            log.info(f"[Briefing] Reintentando en 10 segundos...")
+            time.sleep(10)
 
     return None
 
@@ -1128,11 +1128,23 @@ def send_news_briefing() -> bool:
     log.info(f"[Briefing] {len(headlines)} titulares recopilados. Generando resumen...")
     briefing = generate_news_briefing(headlines)
 
-    if not briefing:
-        return False
-
     now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
+
+    if briefing:
+        header = f"📰 BRIEFING DE NOTICIAS — {date_str}"
+    else:
+        # Fallback: Gemini no respondió — enviar titulares en bruto
+        log.warning("[Briefing] Gemini no disponible, enviando titulares en bruto.")
+        seen_titles: set[str] = set()
+        lines = [f"📰 TITULARES — {date_str}", ""]
+        for h in headlines:
+            if h["title"] in seen_titles:
+                continue
+            seen_titles.add(h["title"])
+            lines.append(f"• [{h['source']}] {h['title']}")
+        briefing = "\n".join(lines[2:])   # el header ya va aparte
+        header = lines[0]
 
     # Partidos de hoy
     fixtures = fetch_upcoming_fixtures()
@@ -1140,7 +1152,7 @@ def send_news_briefing() -> bool:
     if fixtures:
         fixtures_section = "\n\n📅 PARTIDOS HOY:\n" + "\n".join(fixtures)
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{fixtures_section}"
+    message = f"{header}\n\n{briefing}{fixtures_section}"
     success = _send_plain_message(message)
     if success:
         log.info("[Briefing] Enviado correctamente.")
