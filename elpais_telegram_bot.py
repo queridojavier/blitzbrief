@@ -84,11 +84,27 @@ NEWS_SOURCES: dict[str, str] = {
 # Ventana temporal: artículos publicados en las últimas N horas
 LOOKBACK_HOURS = 26  # 26h para cubrir holgadamente un día completo
 
-# User-Agent para las peticiones HTTP
+# User-Agent y cabeceras tipo navegador para las peticiones HTTP.
+# El País ha empezado a devolver 403 en las páginas /autor/<slug>/ cuando
+# solo se envía un User-Agent escueto, así que mandamos el conjunto
+# completo de cabeceras que enviaría un Chrome real.
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+BROWSER_HEADERS: dict[str, str] = {
+    "User-Agent": USER_AGENT,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 # Archivo local para evitar enviar duplicados entre ejecuciones
 SEEN_FILE = Path(__file__).parent / ".elpais_seen_articles.json"
@@ -263,9 +279,8 @@ def _fetch_page(url: str) -> tuple[Optional[str], Optional[str]]:
     Si todo va bien: (html, None).
     Si falla:        (None, descripción del error).
     """
-    headers = {"User-Agent": USER_AGENT}
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
         resp.raise_for_status()
         return resp.text, None
     except requests.RequestException as e:
@@ -1055,11 +1070,21 @@ def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
     today = datetime.now(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y")
 
     prompt = f"""Hoy es {today}. Eres el editor de un briefing matutino ultra-breve.
-Tu trabajo es SELECCIONAR la noticia más importante de cada categoría, no comprimir todas.
+Tu única fuente son los titulares listados al final de este prompt: nada más.
 
-De todos los titulares, elige LA ÚNICA NOTICIA MÁS RELEVANTE de cada sección y resúmela en una frase corta.
+ANTI-ALUCINACIÓN (lo más importante):
+- USA EXCLUSIVAMENTE los titulares listados abajo. Si una noticia no aparece literalmente en esa lista, NO LA INCLUYAS.
+- NO uses tu conocimiento previo del mundo, ni hechos que recuerdes, ni contexto histórico, ni sucesos que "podrían" estar pasando.
+- NO inventes nombres, cifras, capturas, dimisiones, victorias, fichajes, lesiones ni detenciones.
+- Si una sección no tiene un titular concreto y verificable en la lista, OMÍTELA por completo (no escribas la línea).
+- Antes de redactar cada línea, comprueba mentalmente que cada dato proviene de un titular concreto de la lista.
+- En caso de duda, OMITE la sección. Es mejor un briefing corto que uno con datos inventados.
 
-FORMATO (una línea por sección):
+SELECCIÓN:
+- Para cada sección, elige el titular MÁS IMPORTANTE de los listados que encaje en esa categoría y resúmelo en una frase corta.
+- Si dos titulares se contradicen, elige el más reciente o el de la fuente más fiable.
+
+FORMATO (una línea por sección, omite la línea entera si no hay titular adecuado):
 🌍 Internacional: [la noticia internacional más importante hoy]
 🏛 España: [la noticia nacional más relevante hoy]
 💰 Economía: [solo si hay algo económico realmente destacable]
@@ -1067,16 +1092,15 @@ FORMATO (una línea por sección):
 ⚽ Deporte: [la noticia más importante hoy sobre Real Madrid (fútbol o baloncesto), Málaga CF o Unicaja: resultado, lesión, fichaje, rueda de prensa, etc.]
 🤖 Tech: [solo si hay un lanzamiento, anuncio o novedad REAL de hoy]
 
-REGLAS ESTRICTAS:
-- UNA sola noticia por sección, la más importante, en UNA frase de máximo 15 palabras
-- OMITE secciones enteras si no hay nada genuinamente novedoso o relevante HOY
-- Para Tech: ignora noticias sobre productos ya lanzados hace días/semanas. Solo incluye si es algo nuevo de hoy
-- Para Deporte: incluye cualquier noticia sobre Real Madrid (fútbol O baloncesto), Málaga CF o Unicaja: resultados, fichajes, crónicas, lesiones, ruedas de prensa, etc. No te limites solo a partidos de hoy
-- Todo en español
-- NO uses asteriscos, negritas ni markdown
-- NO añadas introducción, cierre, fuentes ni relleno
+ESTILO:
+- UNA sola noticia por sección, en UNA frase de máximo 15 palabras.
+- Para Tech: ignora noticias sobre productos ya lanzados hace días/semanas. Solo incluye si es algo nuevo de hoy.
+- Para Deporte: incluye cualquier noticia sobre Real Madrid (fútbol O baloncesto), Málaga CF o Unicaja: resultados, fichajes, crónicas, lesiones, ruedas de prensa, etc. No te limites solo a partidos de hoy.
+- Todo en español.
+- NO uses asteriscos, negritas ni markdown.
+- NO añadas introducción, cierre, fuentes ni relleno.
 
-TITULARES:
+TITULARES (única fuente válida):
 {headlines_text}"""
 
     url = (
@@ -1086,7 +1110,9 @@ TITULARES:
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 8192},
+        # temperature baja para reducir alucinaciones: queremos extracción
+        # casi literal de los titulares, no creatividad.
+        "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.2},
     }
 
     # Intentar hasta 3 veces (con 10s de espera entre intentos)
