@@ -41,6 +41,18 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
+# curl_cffi imita el TLS fingerprint de un navegador real, lo que es
+# necesario para bypasar la protección anti-bot de El País en
+# /autor/<slug>/ (devuelve 403 a `requests` aunque mandes todas las
+# cabeceras de Chrome). Es opcional: si no está instalado, caemos a
+# `requests` normal.
+try:
+    from curl_cffi import requests as cffi_requests  # type: ignore
+    HAS_CURL_CFFI = True
+except ImportError:
+    cffi_requests = None  # type: ignore
+    HAS_CURL_CFFI = False
+
 # ---------------------------------------------------------------------------
 # Configuración
 # ---------------------------------------------------------------------------
@@ -273,12 +285,66 @@ def article_hash(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 
+# Sesiones HTTP reutilizables. El País bloquea peticiones sin cookies de
+# sesión (las pasa la 1ª, devuelve 403 a partir de la 2ª), así que hace
+# falta reutilizar la misma sesión para que las cookies persistan entre
+# autores.
+_ELPAIS_SESSION = None  # curl_cffi.Session si está disponible
+_REQUESTS_SESSION: Optional[requests.Session] = None
+_ELPAIS_WARMED_UP = False
+
+
+def _get_elpais_session():
+    """Sesión persistente para elpais.com. Prefiere curl_cffi (TLS
+    fingerprint de Chrome) y cae a requests.Session si no está."""
+    global _ELPAIS_SESSION, _REQUESTS_SESSION
+    if HAS_CURL_CFFI:
+        if _ELPAIS_SESSION is None:
+            _ELPAIS_SESSION = cffi_requests.Session(  # type: ignore[union-attr]
+                impersonate="chrome120"
+            )
+            _ELPAIS_SESSION.headers.update(BROWSER_HEADERS)
+        return _ELPAIS_SESSION
+    if _REQUESTS_SESSION is None:
+        _REQUESTS_SESSION = requests.Session()
+        _REQUESTS_SESSION.headers.update(BROWSER_HEADERS)
+    return _REQUESTS_SESSION
+
+
+def _warmup_elpais(session) -> None:
+    """Visita la portada para que el servidor nos asigne cookies de
+    sesión. Sin esto, El País deja pasar la 1ª petición y devuelve 403 a
+    partir de la 2ª."""
+    global _ELPAIS_WARMED_UP
+    if _ELPAIS_WARMED_UP:
+        return
+    try:
+        session.get("https://elpais.com/", timeout=15)
+    except Exception as e:
+        log.warning(f"[El País] Warmup falló (continuamos igualmente): {e}")
+    _ELPAIS_WARMED_UP = True
+
+
 def _fetch_page(url: str) -> tuple[Optional[str], Optional[str]]:
     """Descarga una URL y devuelve (html, error).
 
     Si todo va bien: (html, None).
     Si falla:        (None, descripción del error).
+
+    Para elpais.com usa una sesión persistente con warmup en la portada,
+    porque su anti-bot exige cookies de sesión válidas.
     """
+    if "elpais.com" in url:
+        session = _get_elpais_session()
+        _warmup_elpais(session)
+        try:
+            resp = session.get(url, timeout=15)
+            resp.raise_for_status()
+            return resp.text, None
+        except Exception as e:
+            log.warning(f"Error al descargar {url}: {e}")
+            return None, str(e)
+
     try:
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
         resp.raise_for_status()
