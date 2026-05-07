@@ -575,7 +575,13 @@ def fetch_podcast_segments(
     label: str, feed_url: str, title_filter: str,
     cutoff: datetime, errors: Optional[list] = None,
 ) -> list[dict]:
-    """Extrae segmentos de podcast que coincidan con un filtro en el título."""
+    """Extrae segmentos de podcast que coincidan con un filtro en el título.
+
+    Si el feed carga bien pero hay episodios recientes (dentro de cutoff)
+    y ninguno empieza por `title_filter`, añade un aviso a `errors` con
+    los títulos recientes — así podemos detectar que el formato de
+    título ha cambiado en la fuente y ajustar el filtro sin redeploy.
+    """
     xml_text, err = _fetch_page(feed_url)
     if not xml_text:
         if errors is not None and err:
@@ -592,17 +598,15 @@ def fetch_podcast_segments(
 
     segments = []
     filter_lower = title_filter.lower()
+    # Para el aviso de "filtro caducado": títulos de episodios dentro
+    # del cutoff que no empiezan por el filtro.
+    recent_unmatched_titles: list[str] = []
 
     for item in root.findall(".//item"):
         title_el = item.find("title")
         if title_el is None or not title_el.text:
             continue
         title = title_el.text.strip()
-
-        # Comprobar que el título empieza con el filtro (ej. "La Contra |")
-        # para evitar falsos positivos ("guerra contra Irán", etc.)
-        if not title.lower().startswith(filter_lower):
-            continue
 
         # Fecha (obligatoria para podcasts — sin fecha se descarta)
         pub_el = item.find("pubDate")
@@ -614,6 +618,12 @@ def fetch_podcast_segments(
                 pass
 
         if not pub_date or pub_date < cutoff:
+            continue
+
+        # Comprobar que el título empieza con el filtro (ej. "La Contra |")
+        # para evitar falsos positivos ("guerra contra Irán", etc.)
+        if not title.lower().startswith(filter_lower):
+            recent_unmatched_titles.append(title)
             continue
 
         # URL del audio (enclosure)
@@ -643,6 +653,19 @@ def fetch_podcast_segments(
             "date": pub_date,
             "duration": duration,
         })
+
+    # Diagnóstico: si no encontramos ningún segmento pero el feed sí
+    # tenía episodios recientes, probablemente el formato del título ha
+    # cambiado y nuestro filtro ya no encaja. Notificamos con muestras
+    # para poder ajustar `filter` en authors.json sin tener que mirar
+    # logs de GitHub Actions.
+    if not segments and recent_unmatched_titles and errors is not None:
+        sample = recent_unmatched_titles[:4]
+        sample_text = "\n".join(f"  · {t}" for t in sample)
+        errors.append(
+            f"Podcast — {label}: feed OK pero ningún episodio reciente "
+            f"empieza por '{title_filter}'. Títulos recientes:\n{sample_text}"
+        )
 
     return segments
 

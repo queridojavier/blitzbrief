@@ -16,6 +16,7 @@ Uso:
 
 import os
 import sys
+import time
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -87,12 +88,15 @@ def _fetch_page(url: str) -> tuple[Optional[str], Optional[str]]:
 # ---------------------------------------------------------------------------
 
 def fetch_rss_articles(
-    author_name: str, feed_url: str, cutoff: datetime
+    author_name: str, feed_url: str, cutoff: datetime,
+    errors: Optional[list] = None,
 ) -> list[dict]:
     """Extrae artículos/episodios recientes de un feed RSS/Atom."""
     xml_text, err = _fetch_page(feed_url)
     if not xml_text:
         log.error(f"RSS — {author_name}: {err}")
+        if errors is not None and err:
+            errors.append(f"{author_name}: {err}")
         return []
 
     try:
@@ -196,14 +200,19 @@ def fetch_rss_articles(
 # Recopilar todas las fuentes
 # ---------------------------------------------------------------------------
 
-def fetch_all_sources() -> dict[str, list[dict]]:
-    """Scrapea las 5 fuentes y devuelve {autor: [artículos]}."""
+def fetch_all_sources(
+    errors: Optional[list] = None,
+) -> dict[str, list[dict]]:
+    """Scrapea las 5 fuentes y devuelve {autor: [artículos]}.
+
+    Si se pasa `errors`, acumula ahí los fallos de fetch por fuente.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     result: dict[str, list[dict]] = {}
 
     for author, feed_url in HEALTH_SOURCES.items():
         log.info(f"Scrapeando: {author}")
-        articles = fetch_rss_articles(author, feed_url, cutoff)
+        articles = fetch_rss_articles(author, feed_url, cutoff, errors)
         if articles:
             result[author] = articles
             log.info(f"  → {len(articles)} artículos/episodios encontrados")
@@ -262,33 +271,46 @@ REGLAS:
 CONTENIDO DE LA SEMANA:
 {content_block}"""
 
-    try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            "gemini-2.5-flash:generateContent"
-            f"?key={GEMINI_API_KEY}"
-        )
-        resp = requests.post(
-            url,
-            headers={"content-type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 8192},
-            },
-            timeout=90,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        candidates = data.get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if parts and parts[0].get("text"):
-                return parts[0]["text"]
-        log.error(f"Respuesta inesperada de Gemini: {data}")
-        return None
-    except requests.RequestException as e:
-        log.error(f"Error al llamar a Gemini API: {e}")
-        return None
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.5-flash:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 8192},
+    }
+
+    # Hasta 3 intentos con espera entre ellos: Gemini 2.5 Flash devuelve
+    # 503/overload con frecuencia y un solo fallo no debe tirar el digest.
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                url,
+                headers={"content-type": "application/json"},
+                json=payload,
+                timeout=90,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts and parts[0].get("text"):
+                    return parts[0]["text"]
+            log.error(
+                f"Respuesta inesperada de Gemini (intento {attempt + 1}): {data}"
+            )
+        except requests.RequestException as e:
+            log.error(
+                f"Error al llamar a Gemini API (intento {attempt + 1}): {e}"
+            )
+
+        if attempt < 2:
+            log.info("Reintentando en 10 segundos...")
+            time.sleep(10)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +354,25 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
     return chunks
 
 
+def send_telegram_text(text: str) -> bool:
+    """Envía un mensaje de texto plano por Telegram (un único chunk)."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error("Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        resp = requests.post(
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return bool(resp.json().get("ok"))
+    except requests.RequestException as e:
+        log.error(f"Error al enviar a Telegram: {e}")
+        return False
+
+
 def send_telegram_digest(digest: str) -> bool:
     """Envía el digest por Telegram como texto plano."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -373,10 +414,25 @@ def main() -> None:
     log.info("=== BlitzHealth — Digest semanal ===")
 
     # 1. Scrapear fuentes
-    sources_data = fetch_all_sources()
+    fetch_errors: list[str] = []
+    sources_data = fetch_all_sources(fetch_errors)
 
     total = sum(len(arts) for arts in sources_data.values())
     log.info(f"Total: {total} artículos/episodios de {len(sources_data)} autores.")
+
+    # Si TODAS las fuentes fallaron / vinieron vacías, mejor avisar a
+    # Telegram que quedarse callado un domingo entero.
+    if not sources_data:
+        msg = "⚠️ BlitzHealth: ninguna fuente devolvió contenido esta semana."
+        if fetch_errors:
+            msg += "\n\nFuentes con error:\n" + "\n".join(
+                f"• {e}" for e in fetch_errors
+            )
+        else:
+            msg += "\nLos feeds responden bien pero ninguno tiene artículos en los últimos 7 días."
+        send_telegram_text(msg)
+        log.warning("Sin contenido — notificado a Telegram. Abortando.")
+        sys.exit(1)
 
     # 2. Generar digest con Gemini
     log.info("Generando digest con Gemini...")
@@ -384,6 +440,10 @@ def main() -> None:
 
     if not digest:
         log.warning("No se pudo generar el digest. Abortando.")
+        send_telegram_text(
+            "⚠️ BlitzHealth: Gemini no respondió tras 3 intentos. "
+            "Sin digest esta semana."
+        )
         sys.exit(1)
 
     # 3. Guardar como markdown
