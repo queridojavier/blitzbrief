@@ -29,11 +29,14 @@ import json
 import logging
 import hashlib
 import random
+import unicodedata
 import xml.etree.ElementTree as ET
+from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -80,8 +83,12 @@ NEWS_SOURCES: dict[str, str] = {
     "Anthropic News": "https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml",
 }
 
+BITCOIN_MIN_DAILY_CHANGE_PCT = 3.0
+BITCOIN_EXPLANATION_CHANGE_PCT = 5.0
+
 # Ventana temporal: artículos publicados en las últimas N horas
 LOOKBACK_HOURS = 26  # 26h para cubrir holgadamente un día completo
+MAX_ARTICLES_PER_AUTHOR = 1
 
 # User-Agent para las peticiones HTTP
 USER_AGENT = (
@@ -94,6 +101,7 @@ SEEN_FILE = Path(__file__).parent / ".elpais_seen_articles.json"
 AUTHORS_FILE = Path(__file__).parent / "authors.json"
 # Caché de IDs de equipos deportivos (se auto-rellena en el primer uso)
 SPORTS_ID_CACHE_FILE = Path(__file__).parent / ".sports_ids_cache.json"
+MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 # ── Equipos a seguir ───────────────────────────────────────────────
 # Fútbol: IDs de api-football.com (v3.football.api-sports.io)
@@ -253,7 +261,76 @@ def _fetch_page(url: str) -> tuple[Optional[str], Optional[str]]:
         return None, str(e)
 
 
+def _normalize_text(text: str) -> str:
+    """Normaliza texto para comparaciones tolerantes a acentos y espacios."""
+    normalized = unicodedata.normalize("NFKD", text)
+    without_accents = "".join(
+        ch for ch in normalized if not unicodedata.combining(ch)
+    )
+    return " ".join(without_accents.casefold().split())
+
+
+def _limit_articles_per_author(articles: list[dict]) -> list[dict]:
+    """Devuelve solo los artículos más recientes esperados para un autor."""
+    articles.sort(
+        key=lambda art: art.get("date") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return articles[:MAX_ARTICLES_PER_AUTHOR]
+
+
+def _is_google_news_search_feed(feed_url: str) -> bool:
+    parsed = urlparse(feed_url)
+    return parsed.netloc.endswith("news.google.com") and "/rss/search" in parsed.path
+
+
+def _extract_site_filter_from_google_news(feed_url: str) -> Optional[str]:
+    parsed = urlparse(feed_url)
+    query = parse_qs(parsed.query).get("q", [""])[0]
+    for token in query.split():
+        if token.startswith("site:"):
+            site = token.split(":", 1)[1].strip().lower()
+            return site.removeprefix("www.")
+    return None
+
+
+def _rss_item_matches_author(author_name: str, title: str, subtitle: str = "") -> bool:
+    author_tokens = [t for t in _normalize_text(author_name).split() if len(t) >= 3]
+    if not author_tokens:
+        return True
+    normalized_text = _normalize_text(f"{title} {subtitle}")
+    return sum(token in normalized_text for token in author_tokens) >= 2
+
+
+def _extract_first_url_from_html_snippet(snippet: str) -> str:
+    soup = BeautifulSoup(snippet, "html.parser")
+    link = soup.find("a")
+    return (link.get("href", "") if link else "").strip()
+
+
+def _url_matches_site_filter(url: str, required_site: Optional[str]) -> bool:
+    if not required_site:
+        return True
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    return host.endswith(required_site)
+
+
 # ── Scraper: El País ──────────────────────────────────────────────
+
+
+def _elpais_article_matches_author(article_el, author_name: str, slug: str) -> bool:
+    """Comprueba que una tarjeta de El País pertenece al autor esperado."""
+    author_path = f"/autor/{slug}/"
+    for link in article_el.select('a[href*="/autor/"]'):
+        href = link.get("href", "")
+        if author_path in href:
+            return True
+
+        link_text = _normalize_text(link.get_text(" ", strip=True))
+        if link_text == _normalize_text(author_name):
+            return True
+
+    return False
 
 
 def fetch_elpais_articles(
@@ -271,6 +348,9 @@ def fetch_elpais_articles(
     articles = []
 
     for article_el in soup.select("article"):
+        if not _elpais_article_matches_author(article_el, author_name, slug):
+            continue
+
         link_el = article_el.select_one("h2 a")
         if not link_el:
             continue
@@ -314,7 +394,7 @@ def fetch_elpais_articles(
             "tag": tag,
         })
 
-    return articles
+    return _limit_articles_per_author(articles)
 
 
 # ── Scraper: El Plural ────────────────────────────────────────────
@@ -374,7 +454,7 @@ def fetch_elplural_articles(
             "tag": "",
         })
 
-    return articles
+    return _limit_articles_per_author(articles)
 
 
 def _fetch_elplural_article_date(url: str) -> Optional[datetime]:
@@ -414,6 +494,8 @@ def fetch_rss_articles(
         return []
 
     articles = []
+    apply_author_guard = _is_google_news_search_feed(feed_url)
+    required_site = _extract_site_filter_from_google_news(feed_url) if apply_author_guard else None
 
     # Detectar nombre de la fuente desde el feed
     channel = root.find("channel")
@@ -434,6 +516,13 @@ def fetch_rss_articles(
 
         title = title_el.text or ""
         href = link_el.text or ""
+        raw_description = desc_el.text if (desc_el is not None and desc_el.text) else ""
+        candidate_url = _extract_first_url_from_html_snippet(raw_description) or href
+
+        if apply_author_guard and not _rss_item_matches_author(author_name, title, raw_description):
+            continue
+        if apply_author_guard and not _url_matches_site_filter(candidate_url, required_site):
+            continue
 
         # Parsear fecha RFC 2822 (formato RSS estándar)
         pub_date = None
@@ -447,10 +536,10 @@ def fetch_rss_articles(
             continue
 
         subtitle = ""
-        if desc_el is not None and desc_el.text:
+        if raw_description:
             # Limpiar HTML básico de la descripción
             from html import unescape
-            subtitle = unescape(desc_el.text)
+            subtitle = unescape(raw_description)
             # Eliminar tags HTML
             subtitle = BeautifulSoup(subtitle, "html.parser").get_text(strip=True)
 
@@ -464,7 +553,7 @@ def fetch_rss_articles(
             "tag": "",
         })
 
-    return articles
+    return _limit_articles_per_author(articles)
 
 
 # ── Scraper: Podcast (RSS + filtro por título) ────────────────────
@@ -745,6 +834,100 @@ def fetch_news_headlines(max_per_source: int = 7) -> list[dict]:
     return headlines
 
 
+def fetch_bitcoin_snapshot() -> Optional[dict]:
+    """Obtiene cotización de BTC en EUR y su variación aproximada de 24h."""
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids": "bitcoin",
+                "vs_currencies": "eur",
+                "include_24hr_change": "true",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("bitcoin", {})
+        price_eur = data.get("eur")
+        change_pct = data.get("eur_24h_change")
+        if price_eur is None or change_pct is None:
+            return None
+        return {
+            "price_eur": float(price_eur),
+            "change_pct": float(change_pct),
+        }
+    except (requests.RequestException, TypeError, ValueError) as e:
+        log.warning(f"[Briefing] No se pudo obtener cotización BTC/EUR: {e}")
+        return None
+
+
+def _infer_bitcoin_context(headlines: list[dict]) -> Optional[str]:
+    """Intenta explicar un movimiento fuerte de BTC a partir de titulares del día."""
+    reason_rules = [
+        (
+            ("etf", "bitcoin"),
+            "Flujo de ETF o noticia regulatoria ligada a Bitcoin.",
+        ),
+        (
+            ("fed",),
+            "Mercado pendiente de la Fed y de expectativas de tipos.",
+        ),
+        (
+            ("arancel",),
+            "Tensión macro por aranceles y movimiento global de activos de riesgo.",
+        ),
+        (
+            ("inflación",),
+            "Dato macro de inflación moviendo expectativas de tipos y apetito por riesgo.",
+        ),
+        (
+            ("trump", "casa blanca", "ee uu", "estados unidos"),
+            "Catalizador político en EE.UU. afectando a los activos de riesgo.",
+        ),
+        (
+            ("liquid",),
+            "Posibles liquidaciones agresivas amplificando el movimiento.",
+        ),
+        (
+            ("hack", "robo", "exchange"),
+            "Incidente de seguridad o tensión en exchanges cripto.",
+        ),
+    ]
+
+    for item in headlines:
+        haystack = " ".join([
+            item.get("source", ""),
+            item.get("title", ""),
+            item.get("description", ""),
+        ]).lower()
+        for keywords, reason in reason_rules:
+            if any(keyword in haystack for keyword in keywords):
+                return reason
+    return None
+
+
+def build_bitcoin_note(headlines: list[dict]) -> Optional[str]:
+    """Construye una nota opcional de BTC/EUR cuando el movimiento diario lo merece."""
+    snapshot = fetch_bitcoin_snapshot()
+    if not snapshot:
+        return None
+
+    change_pct = snapshot["change_pct"]
+    if abs(change_pct) < BITCOIN_MIN_DAILY_CHANGE_PCT:
+        return None
+
+    price_str = f"{snapshot['price_eur']:,.0f}".replace(",", ".")
+    sign = "+" if change_pct > 0 else ""
+    note = f"₿ Bitcoin: {price_str} € ({sign}{change_pct:.1f}% vs ayer)"
+
+    if abs(change_pct) >= BITCOIN_EXPLANATION_CHANGE_PCT:
+        context = _infer_bitcoin_context(headlines)
+        if context:
+            note += f"\nMotivo probable: {context}"
+
+    return note
+
+
 # ── Fixtures deportivos ────────────────────────────────────────────
 
 
@@ -795,8 +978,7 @@ def fetch_upcoming_fixtures() -> list[str]:
     if not API_SPORTS_KEY:
         return []
 
-    tz_madrid = timezone(timedelta(hours=2))  # CEST; en invierno usar hours=1
-    now = datetime.now(tz_madrid)
+    now = datetime.now(MADRID_TZ)
     today = now.date()
     tomorrow = today + timedelta(days=1)
     target_dates = {today, tomorrow}
@@ -821,7 +1003,7 @@ def fetch_upcoming_fixtures() -> list[str]:
         for fix in fixtures:
             try:
                 date_str = fix["fixture"]["date"]  # ISO 8601 con tz
-                match_dt = datetime.fromisoformat(date_str).astimezone(tz_madrid)
+                match_dt = datetime.fromisoformat(date_str).astimezone(MADRID_TZ)
                 if match_dt.date() not in target_dates:
                     continue
                 home = fix["teams"]["home"]["name"]
@@ -862,7 +1044,7 @@ def fetch_upcoming_fixtures() -> list[str]:
                     continue
                 match_dt = datetime.fromisoformat(
                     date_str.replace("Z", "+00:00")
-                ).astimezone(tz_madrid)
+                ).astimezone(MADRID_TZ)
                 if match_dt.date() not in target_dates:
                     continue
                 home = game["teams"]["home"]["name"]
@@ -899,7 +1081,7 @@ def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
             headlines_text += f" — {h['description']}"
         headlines_text += "\n"
 
-    today = datetime.now(timezone(timedelta(hours=2))).strftime("%d/%m/%Y")
+    today = datetime.now(MADRID_TZ).strftime("%d/%m/%Y")
 
     prompt = f"""Hoy es {today}. Eres el editor de un briefing matutino ultra-breve.
 Tu trabajo es SELECCIONAR la noticia más importante de cada categoría, no comprimir todas.
@@ -971,10 +1153,12 @@ def send_news_briefing() -> bool:
         return False
 
     # Enviar como texto plano (sin MarkdownV2 para evitar problemas de escape)
-    now = datetime.now(timezone.utc).astimezone(
-        timezone(timedelta(hours=2))  # CEST
-    )
+    now = datetime.now(timezone.utc).astimezone(MADRID_TZ)
     date_str = now.strftime("%d/%m/%Y")
+
+    # Añadir bloque de fixtures si hay partidos hoy o mañana
+    bitcoin_note = build_bitcoin_note(headlines)
+    bitcoin_block = f"\n\n{bitcoin_note}" if bitcoin_note else ""
 
     # Añadir bloque de fixtures si hay partidos hoy o mañana
     fixtures = fetch_upcoming_fixtures()
@@ -982,7 +1166,10 @@ def send_news_briefing() -> bool:
     if fixtures:
         fixtures_block = "\n\n📅 PARTIDOS HOY / MAÑANA:\n" + "\n".join(fixtures)
 
-    message = f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n{briefing}{fixtures_block}"
+    message = (
+        f"📰 BRIEFING DE NOTICIAS — {date_str}\n\n"
+        f"{briefing}{bitcoin_block}{fixtures_block}"
+    )
 
     # Enviar (partiendo en trozos si supera el límite de Telegram)
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -1037,9 +1224,7 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
 
 def format_telegram_message(all_articles: list[dict]) -> str:
     """Formatea el mensaje de Telegram con Markdown."""
-    now = datetime.now(timezone.utc).astimezone(
-        timezone(timedelta(hours=1))  # CET
-    )
+    now = datetime.now(timezone.utc).astimezone(MADRID_TZ)
     date_str = now.strftime("%A %d de %B de %Y").capitalize()
 
     lines = [f"📰 *Tu prensa del día*", f"_{date_str}_", ""]
@@ -1129,7 +1314,9 @@ def run_digest(notify_empty: bool = False) -> None:
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen = load_seen_articles()
+    queued_hashes = set(seen)
     all_new_articles: list[dict] = []
+    pending_article_hashes: set[str] = set()
     fetch_errors: list[str] = []
 
     # ── El País ───────────────────────────────────────────────────
@@ -1138,9 +1325,10 @@ def run_digest(notify_empty: bool = False) -> None:
         articles = fetch_elpais_articles(author_name, slug, cutoff, fetch_errors)
         for art in articles:
             h = article_hash(art["url"])
-            if h not in seen:
+            if h not in queued_hashes:
                 all_new_articles.append(art)
-                seen.add(h)
+                pending_article_hashes.add(h)
+                queued_hashes.add(h)
         log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
     # ── El Plural ─────────────────────────────────────────────────
@@ -1149,9 +1337,10 @@ def run_digest(notify_empty: bool = False) -> None:
         articles = fetch_elplural_articles(author_name, slug, cutoff, fetch_errors)
         for art in articles:
             h = article_hash(art["url"])
-            if h not in seen:
+            if h not in queued_hashes:
                 all_new_articles.append(art)
-                seen.add(h)
+                pending_article_hashes.add(h)
+                queued_hashes.add(h)
         log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
     # ── RSS (blogs) ───────────────────────────────────────────────
@@ -1160,9 +1349,10 @@ def run_digest(notify_empty: bool = False) -> None:
         articles = fetch_rss_articles(author_name, feed_url, cutoff, fetch_errors)
         for art in articles:
             h = article_hash(art["url"])
-            if h not in seen:
+            if h not in queued_hashes:
                 all_new_articles.append(art)
-                seen.add(h)
+                pending_article_hashes.add(h)
+                queued_hashes.add(h)
         log.info(f"  → {len(articles)} artículo(s) reciente(s)")
 
     # ── Podcasts (audio directo) ────────────────────────────────────
@@ -1178,9 +1368,9 @@ def run_digest(notify_empty: bool = False) -> None:
         )
         for seg in segments:
             h = article_hash(seg["audio_url"])
-            if h not in seen:
-                podcast_segments.append(seg)
-                seen.add(h)
+            if h not in queued_hashes:
+                podcast_segments.append({**seg, "_hash": h})
+                queued_hashes.add(h)
         log.info(f"  → {len(segments)} segmento(s) encontrado(s)")
 
     # Ordenar por fecha (más reciente primero)
@@ -1196,6 +1386,7 @@ def run_digest(notify_empty: bool = False) -> None:
         )
         success = send_telegram_message(message)
         if success:
+            seen.update(pending_article_hashes)
             save_seen_articles(seen)
     else:
         log.info("No hay artículos nuevos.")
@@ -1206,11 +1397,14 @@ def run_digest(notify_empty: bool = False) -> None:
     # ── Enviar audios de podcast ────────────────────────────────────
     for seg in podcast_segments:
         if seg["audio_url"]:
-            send_telegram_audio(
+            success = send_telegram_audio(
                 seg["audio_url"], seg["title"], seg.get("duration", "")
             )
+            if success:
+                seen.add(seg["_hash"])
 
-    save_seen_articles(seen)
+    if pending_article_hashes or podcast_segments:
+        save_seen_articles(seen)
 
     # ── Alertas de errores ────────────────────────────────────────
     if fetch_errors:
