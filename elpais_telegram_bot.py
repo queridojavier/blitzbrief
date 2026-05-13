@@ -426,8 +426,26 @@ def _url_matches_site_filter(url: str, required_site: Optional[str]) -> bool:
 # ── Scraper: El País ──────────────────────────────────────────────
 
 
+def _elpais_article_is_by_author(article_url: str, slug: str) -> bool:
+    """Verifica que un artículo de elpais.com está firmado por el autor.
+
+    Las páginas de artículo de elpais.com sí son accesibles (al
+    contrario que /autor/<slug>/, que está blindado): contienen el
+    byline con un enlace al perfil del autor. Comprobamos ese enlace
+    como prueba de autoría real, evitando falsos positivos cuando
+    Google News devuelve artículos que solo mencionan al columnista.
+    """
+    if "elpais.com" not in article_url:
+        return False
+    html, _ = _fetch_page(article_url)
+    if not html:
+        return False
+    needle = f"/autor/{slug}/"
+    return needle in html
+
+
 def fetch_elpais_articles(
-    author_name: str, cutoff: datetime, errors: Optional[list] = None
+    author_name: str, slug: str, cutoff: datetime, errors: Optional[list] = None
 ) -> list[dict]:
     """Extrae artículos recientes de un autor de El País vía Google News RSS.
 
@@ -435,6 +453,11 @@ def fetch_elpais_articles(
     pese a cabeceras de navegador, curl_cffi, sesión persistente y
     jitter). Google News indexa El País a las pocas horas, devuelve un
     RSS estable y sin anti-bot.
+
+    Como `"<autor>" site:elpais.com` también devuelve artículos que
+    solo mencionan al columnista (entrevistas, perfiles, homenajes),
+    verificamos la autoría real fetcheando el artículo y comprobando
+    que su byline enlaza a /autor/<slug>/.
     """
     import urllib.parse
 
@@ -474,9 +497,9 @@ def fetch_elpais_articles(
         if not _rss_item_matches_author(author_name, title, raw_description):
             continue
 
-        # Preferimos la URL original de elpais.com si aparece en la
-        # descripción; si no, caemos al <link> de Google News (que abre
-        # bien y redirige al artículo original).
+        # Necesitamos la URL real de elpais.com para verificar el byline.
+        # Si Google News no la expone en el <description>, descartamos el
+        # item: sin URL del artículo no podemos confirmar autoría.
         href = ""
         if raw_description:
             desc_soup = BeautifulSoup(raw_description, "html.parser")
@@ -484,10 +507,6 @@ def fetch_elpais_articles(
                 if "elpais.com" in a["href"] and "news.google.com" not in a["href"]:
                     href = a["href"]
                     break
-        if not href:
-            link_el = item.find("link")
-            if link_el is not None and link_el.text:
-                href = link_el.text.strip()
         if not href:
             continue
 
@@ -499,6 +518,9 @@ def fetch_elpais_articles(
             except (ValueError, TypeError):
                 pass
         if not pub_date or pub_date < cutoff:
+            continue
+
+        if not _elpais_article_is_by_author(href, slug):
             continue
 
         articles.append({
@@ -1560,9 +1582,9 @@ def run_digest(notify_empty: bool = False, mode: str = "morning") -> None:
 
     # ── Tarde: artículos de columnistas (mensaje 1 de tarde) ─────────
     if mode in ("evening", "full"):
-        for author_name in ELPAIS_AUTHORS:
-            log.info(f"[El País] Consultando: {author_name}")
-            articles = fetch_elpais_articles(author_name, cutoff, fetch_errors)
+        for author_name, slug in ELPAIS_AUTHORS.items():
+            log.info(f"[El País] Consultando: {author_name} ({slug})")
+            articles = fetch_elpais_articles(author_name, slug, cutoff, fetch_errors)
             for art in articles:
                 if article_hash(art["url"]) not in seen_set:
                     all_new_articles.append(art)
