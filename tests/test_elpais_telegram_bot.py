@@ -154,36 +154,28 @@ class BlitzBriefTests(unittest.TestCase):
         )
         self.assertIn("news.google.com/rss/search", fetch_page.call_args_list[0].args[0])
 
-    def test_elpais_falls_back_to_direct_scraping_when_google_news_is_empty(self):
+    def test_elpais_does_not_hit_author_page_when_google_news_is_empty(self):
         empty_google_news_xml = """<?xml version="1.0"?>
         <rss><channel><title>Google News</title></channel></rss>
         """
-        direct_html = """
-        <html><body>
-          <article>
-            <h2><a href="/opinion/2026-06-01/columna.html">Artículo directo</a></h2>
-            <p class="c_a"><a href="/autor/manuel-jabois-sueiro/">Manuel Jabois</a></p>
-            <time datetime="2026-06-01T10:00:00+00:00"></time>
-          </article>
-        </body></html>
-        """
+        errors = []
 
         with patch.object(
             bot,
             "_fetch_page",
-            side_effect=[(empty_google_news_xml, None), (direct_html, None)],
-        ):
+            return_value=(empty_google_news_xml, None),
+        ) as fetch_page:
             articles = bot.fetch_elpais_articles(
                 "Manuel Jabois",
                 "manuel-jabois-sueiro",
                 datetime(2026, 6, 1, tzinfo=timezone.utc),
+                errors,
             )
 
-        self.assertEqual([article["title"] for article in articles], ["Artículo directo"])
-        self.assertEqual(
-            articles[0]["url"],
-            "https://elpais.com/opinion/2026-06-01/columna.html",
-        )
+        self.assertEqual(articles, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(fetch_page.call_count, 1)
+        self.assertIn("news.google.com/rss/search", fetch_page.call_args.args[0])
 
     def test_elpais_google_news_success_avoids_direct_page_error(self):
         google_news_xml = """<?xml version="1.0"?>

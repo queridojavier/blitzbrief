@@ -535,16 +535,8 @@ def fetch_elpais_articles(
     if google_articles:
         return google_articles
 
-    direct_errors: list[str] = []
-    direct_articles = _fetch_elpais_author_page_articles(
-        author_name, slug, cutoff, direct_errors
-    )
-    if direct_articles:
-        return direct_articles
-
     if errors is not None:
         errors.extend(google_errors)
-        errors.extend(direct_errors)
     return []
 
 
