@@ -2,7 +2,7 @@
 🏋️ BlitzHealth — Digest semanal de salud y entrenamiento → Telegram
 ====================================================================
 
-Scrapea 5 fuentes RSS de salud/fitness cada domingo, filtra contenido
+Scrapea fuentes RSS de salud/fitness cada domingo, filtra contenido
 de los últimos 7 días, genera un resumen con Gemini y lo envía por
 Telegram. Guarda cada digest como markdown en digests/health/.
 
@@ -210,7 +210,7 @@ def fetch_rss_articles(
 def fetch_all_sources(
     errors: Optional[list] = None,
 ) -> dict[str, list[dict]]:
-    """Scrapea las 5 fuentes y devuelve {autor: [artículos]}.
+    """Scrapea las fuentes configuradas y devuelve {autor: [artículos]}.
 
     Si se pasa `errors`, acumula ahí los fallos de fetch por fuente.
     """
@@ -220,8 +220,8 @@ def fetch_all_sources(
     for author, feed_url in HEALTH_SOURCES.items():
         log.info(f"Scrapeando: {author}")
         articles = fetch_rss_articles(author, feed_url, cutoff, errors)
+        result[author] = articles
         if articles:
-            result[author] = articles
             log.info(f"  → {len(articles)} artículos/episodios encontrados")
         else:
             log.info(f"  → Sin contenido nuevo esta semana")
@@ -247,6 +247,9 @@ def generate_health_digest(sources_data: dict[str, list[dict]]) -> Optional[str]
     content_block = ""
     for author, articles in sources_data.items():
         content_block += f"\n== {author} ==\n"
+        if not articles:
+            content_block += "Sin publicaciones detectadas esta semana.\n"
+            continue
         for art in articles:
             date_str = art["date"].strftime("%d/%m") if art["date"] else "?"
             content_block += f"\n[{date_str}] {art['title']}\n"
@@ -425,11 +428,15 @@ def main() -> None:
     sources_data = fetch_all_sources(fetch_errors)
 
     total = sum(len(arts) for arts in sources_data.values())
-    log.info(f"Total: {total} artículos/episodios de {len(sources_data)} autores.")
+    authors_with_content = sum(1 for arts in sources_data.values() if arts)
+    log.info(
+        f"Total: {total} artículos/episodios de "
+        f"{authors_with_content}/{len(sources_data)} autores."
+    )
 
     # Si TODAS las fuentes fallaron / vinieron vacías, mejor avisar a
     # Telegram que quedarse callado un domingo entero.
-    if not sources_data:
+    if not any(sources_data.values()):
         msg = "⚠️ BlitzHealth: ninguna fuente devolvió contenido esta semana."
         if fetch_errors:
             msg += "\n\nFuentes con error:\n" + "\n".join(
