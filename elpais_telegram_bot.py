@@ -282,6 +282,30 @@ DEFAULT_SOURCE_PROFILE: dict[str, object] = {
     "weight": 0.75,
 }
 
+INTEREST_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "Málaga": ("malaga", "malaga cf", "costa del sol"),
+    "Andalucía": ("andalucia", "andaluz", "sevilla", "granada", "cordoba"),
+    "Real Madrid": ("real madrid", "ancelotti", "bernabeu", "vinicius", "mbappe"),
+    "Málaga CF": ("malaga cf", "malaguista", "la rosaleda"),
+    "IA": ("ia", "inteligencia artificial", "ai"),
+    "OpenAI": ("openai", "chatgpt", "gpt"),
+    "Gemini": ("gemini",),
+    "Google": ("google", "alphabet"),
+    "Apple": ("apple", "iphone", "ios", "mac"),
+    "Anthropic": ("anthropic", "claude"),
+    "salud/longevidad": ("salud", "longevidad", "fitness", "nutricion"),
+    "economía personal": ("economia", "inflacion", "hipoteca", "vivienda", "impuestos"),
+    "Bitcoin": ("bitcoin", "btc", "cripto", "criptomonedas"),
+    "política española": ("gobierno", "congreso", "sanchez", "feijoo", "moncloa"),
+}
+
+BRIEFING_STOPWORDS: set[str] = {
+    "a", "al", "ante", "con", "contra", "de", "del", "desde", "el", "en",
+    "entre", "es", "esta", "este", "ha", "la", "las", "lo", "los", "mas",
+    "no", "para", "por", "que", "se", "sin", "sobre", "su", "sus", "tras",
+    "un", "una", "y",
+}
+
 ELPAIS_AUTHOR_FEEDS: tuple[str, ...] = (
     "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/section/opinion/portada",
     "https://feeds.elpais.com/mrss-s/pages/ep/site/elpais.com/portada",
@@ -652,6 +676,114 @@ def _source_profile(source_name: str) -> dict:
     profile = DEFAULT_SOURCE_PROFILE.copy()
     profile.update(SOURCE_PROFILES.get(source_name, {}))
     return profile
+
+
+def _briefing_tokens(text: str) -> set[str]:
+    normalized = _normalize_text(text)
+    return {
+        token for token in re.findall(r"[a-z0-9]+", normalized)
+        if len(token) >= 3 and token not in BRIEFING_STOPWORDS
+    }
+
+
+def _headline_similarity(first: dict, second: dict) -> float:
+    first_tokens = _briefing_tokens(first.get("title", ""))
+    second_tokens = _briefing_tokens(second.get("title", ""))
+    if not first_tokens or not second_tokens:
+        return 0.0
+    overlap = len(first_tokens & second_tokens)
+    if overlap < 3:
+        return 0.0
+    return overlap / len(first_tokens | second_tokens)
+
+
+def _headlines_are_duplicates(first: dict, second: dict) -> bool:
+    if _normalize_text(first.get("title", "")) == _normalize_text(second.get("title", "")):
+        return True
+    return _headline_similarity(first, second) >= 0.5
+
+
+def _matched_interests(headline: dict) -> list[str]:
+    text = _normalize_text(
+        f"{headline.get('title', '')} {headline.get('description', '')}"
+    )
+    matches: list[str] = []
+    for interest, keywords in INTEREST_KEYWORDS.items():
+        if any(
+            re.search(rf"\b{re.escape(_normalize_text(keyword))}\b", text)
+            for keyword in keywords
+        ):
+            matches.append(interest)
+    return matches
+
+
+def _score_headline(headline: dict, source_count: int = 1) -> float:
+    profile = headline.get("profile") or _source_profile(headline.get("source", ""))
+    score = float(profile.get("weight", 0.75))
+    score += 0.45 * len(_matched_interests(headline))
+    score += min(source_count - 1, 3) * 0.25
+
+    reliability = profile.get("reliability", "")
+    if reliability == "alta":
+        score += 0.2
+    elif reliability == "media-alta":
+        score += 0.1
+
+    source_type = profile.get("type", "")
+    if source_type == "deportivo" and not _matched_interests(headline):
+        score -= 0.35
+    if profile.get("sensationalism") == "medio-alto":
+        score -= 0.1
+    return score
+
+
+def _why_headline_matters(headline: dict, source_count: int) -> str:
+    interests = _matched_interests(headline)
+    profile = headline.get("profile") or _source_profile(headline.get("source", ""))
+    if interests:
+        return f"Conecta con tus intereses: {', '.join(interests[:3])}."
+    if source_count > 1:
+        return f"La cubren {source_count} fuentes con enfoques distintos."
+    if profile.get("scope") == "local":
+        return "Puede afectar directamente a Málaga o Andalucía."
+    if profile.get("scope") == "internacional":
+        return "Aporta contexto internacional relevante."
+    if profile.get("type") == "fuente primaria":
+        return "Es una novedad de una fuente primaria tecnológica."
+    return "Es una noticia relevante dentro de su sección."
+
+
+def curate_news_headlines(headlines: list[dict], max_items: int = 45) -> list[dict]:
+    """Agrupa duplicados y ordena titulares por importancia editorial."""
+    groups: list[list[dict]] = []
+    for headline in headlines:
+        for group in groups:
+            if any(_headlines_are_duplicates(headline, existing) for existing in group):
+                group.append(headline)
+                break
+        else:
+            groups.append([headline])
+
+    curated: list[dict] = []
+    for group in groups:
+        source_count = len({item.get("source", "") for item in group})
+        best = max(group, key=lambda item: _score_headline(item, source_count))
+        sources = sorted({item.get("source", "") for item in group if item.get("source")})
+        orientations = sorted({
+            str((item.get("profile") or {}).get("orientation", ""))
+            for item in group
+            if (item.get("profile") or {}).get("orientation")
+        })
+        enriched = dict(best)
+        enriched["sources"] = sources
+        enriched["orientations"] = orientations
+        enriched["source_count"] = source_count
+        enriched["importance_score"] = round(_score_headline(best, source_count), 2)
+        enriched["why_it_matters"] = _why_headline_matters(best, source_count)
+        curated.append(enriched)
+
+    curated.sort(key=lambda item: item.get("importance_score", 0), reverse=True)
+    return curated[:max_items]
 
 
 def _rss_item_matches_author(author_name: str, title: str, subtitle: str = "") -> bool:
@@ -1902,9 +2034,19 @@ def generate_news_briefing(headlines: list[dict]) -> Optional[str]:
     # Preparar los titulares como texto
     headlines_text = ""
     for h in headlines:
-        headlines_text += f"[{h['source']}] {h['title']}"
-        if h["description"]:
+        sources = ", ".join(h.get("sources") or [h["source"]])
+        orientations = ", ".join(h.get("orientations", []))
+        score = h.get("importance_score", "")
+        why = h.get("why_it_matters", "")
+        headlines_text += f"[{sources}] {h['title']}"
+        if h.get("description"):
             headlines_text += f" — {h['description']}"
+        if score:
+            headlines_text += f" | prioridad: {score}"
+        if why:
+            headlines_text += f" | por qué importa: {why}"
+        if orientations:
+            headlines_text += f" | orientación fuentes: {orientations}"
         headlines_text += "\n"
 
     today = datetime.now(ZoneInfo("Europe/Madrid")).strftime("%d/%m/%Y")
@@ -1923,19 +2065,28 @@ ANTI-ALUCINACIÓN (lo más importante):
 SELECCIÓN:
 - Para cada sección, elige el titular MÁS IMPORTANTE de los listados que encaje en esa categoría y resúmelo en una frase corta.
 - Si dos titulares se contradicen, elige el más reciente o el de la fuente más fiable.
+- Usa las señales de prioridad y "por qué importa" como ayuda editorial, pero no inventes detalles.
+- Cuando una noticia tenga varias fuentes, puedes usarlo como señal de relevancia/pluralidad.
 
-FORMATO (una línea por sección, omite la línea entera si no hay titular adecuado):
+FORMATO (dos líneas por sección, omite el bloque entero si no hay titular adecuado):
 🌍 Internacional: [la noticia internacional más importante hoy]
+   Por qué importa: [frase muy breve basada en el titular o en la señal "por qué importa"]
 🏛 España: [la noticia nacional más relevante hoy]
+   Por qué importa: [frase muy breve]
 💰 Economía: [solo si hay algo económico realmente destacable]
-📍 Málaga: [solo si hay algo local relevante de Málaga o Andalucía]
-⚽ Deporte: [la noticia más importante hoy sobre Real Madrid (fútbol o baloncesto), Málaga CF o Unicaja: resultado, lesión, fichaje, rueda de prensa, etc.]
+   Por qué importa: [frase muy breve]
+📍 Málaga/Andalucía: [solo si hay algo local relevante de Málaga o Andalucía]
+   Por qué importa: [frase muy breve]
+⚽ Deporte: [la noticia más importante hoy sobre Real Madrid o Málaga CF: resultado, lesión, fichaje, rueda de prensa, etc.]
+   Por qué importa: [frase muy breve]
 🤖 Tech: [solo si hay un lanzamiento, anuncio o novedad REAL de hoy]
+   Por qué importa: [frase muy breve]
 
 ESTILO:
 - UNA sola noticia por sección, en UNA frase de máximo 15 palabras.
+- "Por qué importa" debe tener máximo 14 palabras.
 - Para Tech: ignora noticias sobre productos ya lanzados hace días/semanas. Solo incluye si es algo nuevo de hoy.
-- Para Deporte: incluye cualquier noticia sobre Real Madrid (fútbol O baloncesto), Málaga CF o Unicaja: resultados, fichajes, crónicas, lesiones, ruedas de prensa, etc. No te limites solo a partidos de hoy.
+- Para Deporte: incluye cualquier noticia sobre Real Madrid o Málaga CF: resultados, fichajes, crónicas, lesiones, ruedas de prensa, etc. No te limites solo a partidos de hoy.
 - Todo en español.
 - NO uses asteriscos, negritas ni markdown.
 - NO añadas introducción, cierre, fuentes ni relleno.
@@ -1991,8 +2142,12 @@ def send_news_briefing() -> bool:
         log.info("[Briefing] No se obtuvieron titulares.")
         return False
 
-    log.info(f"[Briefing] {len(headlines)} titulares recopilados. Generando resumen...")
-    briefing = generate_news_briefing(headlines)
+    curated_headlines = curate_news_headlines(headlines)
+    log.info(
+        f"[Briefing] {len(headlines)} titulares recopilados; "
+        f"{len(curated_headlines)} tras curación. Generando resumen..."
+    )
+    briefing = generate_news_briefing(curated_headlines)
 
     now = datetime.now(ZoneInfo("Europe/Madrid"))
     date_str = now.strftime("%d/%m/%Y")
@@ -2004,7 +2159,7 @@ def send_news_briefing() -> bool:
         log.warning("[Briefing] Gemini no disponible, enviando titulares en bruto.")
         seen_titles: set[str] = set()
         lines = [f"📰 TITULARES — {date_str}", ""]
-        for h in headlines:
+        for h in curated_headlines:
             if h["title"] in seen_titles:
                 continue
             seen_titles.add(h["title"])

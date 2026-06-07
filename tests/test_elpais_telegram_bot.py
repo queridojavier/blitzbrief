@@ -399,6 +399,94 @@ class BlitzBriefTests(unittest.TestCase):
         self.assertEqual(headlines[0]["profile"]["orientation"], "conservador / centro-derecha")
         self.assertEqual(headlines[0]["profile"]["reliability"], "media-alta")
 
+    def test_curate_news_headlines_groups_duplicate_titles(self):
+        headlines = [
+            {
+                "source": "El País",
+                "title": "El Gobierno aprueba una nueva ley de vivienda",
+                "description": "",
+                "profile": bot._source_profile("El País"),
+            },
+            {
+                "source": "ABC",
+                "title": "El Gobierno aprueba la nueva ley de vivienda",
+                "description": "",
+                "profile": bot._source_profile("ABC"),
+            },
+        ]
+
+        curated = bot.curate_news_headlines(headlines)
+
+        self.assertEqual(len(curated), 1)
+        self.assertEqual(curated[0]["source_count"], 2)
+        self.assertEqual(curated[0]["sources"], ["ABC", "El País"])
+
+    def test_curate_news_headlines_prioritizes_interests(self):
+        headlines = [
+            {
+                "source": "BBC Mundo",
+                "title": "Una noticia internacional genérica",
+                "description": "",
+                "profile": bot._source_profile("BBC Mundo"),
+            },
+            {
+                "source": "Google Gemini Blog",
+                "title": "Google presenta novedades de Gemini para IA",
+                "description": "",
+                "profile": bot._source_profile("Google Gemini Blog"),
+            },
+        ]
+
+        curated = bot.curate_news_headlines(headlines)
+
+        self.assertEqual(curated[0]["source"], "Google Gemini Blog")
+        self.assertIn("Gemini", curated[0]["why_it_matters"])
+
+    def test_interest_matching_uses_word_boundaries(self):
+        headline = {
+            "title": "Los socios deciden hoy el futuro del club",
+            "description": "Una crónica institucional sin tecnología.",
+        }
+
+        self.assertEqual(bot._matched_interests(headline), [])
+
+    def test_generate_news_briefing_includes_importance_context(self):
+        captured = {}
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "candidates": [
+                        {"content": {"parts": [{"text": "🏛 España: Test"}]}}
+                    ]
+                }
+
+        def fake_post(url, headers, json, timeout):
+            captured["prompt"] = json["contents"][0]["parts"][0]["text"]
+            return FakeResponse()
+
+        headline = {
+            "source": "ABC",
+            "sources": ["ABC", "El País"],
+            "orientations": ["conservador / centro-derecha", "centro-izquierda / progresista"],
+            "title": "El Gobierno aprueba una nueva ley de vivienda",
+            "description": "",
+            "importance_score": 2.0,
+            "why_it_matters": "Conecta con tus intereses: economía personal.",
+        }
+
+        with patch.object(bot, "GEMINI_API_KEY", "key"), \
+             patch.object(bot.requests, "post", side_effect=fake_post):
+            result = bot.generate_news_briefing([headline])
+
+        self.assertEqual(result, "🏛 España: Test")
+        self.assertIn("por qué importa", captured["prompt"])
+        self.assertIn("prioridad: 2.0", captured["prompt"])
+        self.assertIn("ABC, El País", captured["prompt"])
+
 
 if __name__ == "__main__":
     unittest.main()
